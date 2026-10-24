@@ -60,14 +60,16 @@ export function createEngineAudio({ sr, log = console } = {}) {
   }
 
   // ---------- loading / validation / fallback ----------
+  const TEXT_PLAIN_HOSTS = /^https:\/\/(raw|gist)\.githubusercontent\.com\//; // serve text/plain: go straight to Blob
+  async function blobImport(url) {
+    const r = await fetch(url, { mode: 'cors' }); if (!r.ok) throw new Error('HTTP ' + r.status + ' for ' + url);
+    const bl = URL.createObjectURL(new Blob([await r.text()], { type: 'text/javascript' }));
+    try { return await import(bl); } finally { URL.revokeObjectURL(bl); }
+  }
   async function importModule(url) {
+    if (TEXT_PLAIN_HOSTS.test(url)) return blobImport(url); // single-file plugins only
     try { return await import(url); }
-    catch (e) { // e.g. raw.githubusercontent.com serves text/plain: retry as a Blob module (single-file plugins only)
-      if (!/^https:/.test(url)) throw e;
-      const r = await fetch(url, { mode: 'cors' }); if (!r.ok) throw new Error('HTTP ' + r.status + ' for ' + url);
-      const bl = URL.createObjectURL(new Blob([await r.text()], { type: 'text/javascript' }));
-      try { return await import(bl); } finally { URL.revokeObjectURL(bl); }
-    }
+    catch (e) { if (!/^https:/.test(url)) throw e; return blobImport(url); } // e.g. other servers with a wrong MIME type
   }
   function validate(mod) {
     const d = mod && mod.default && typeof mod.default === 'object' ? mod.default : mod;
