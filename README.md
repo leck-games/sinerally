@@ -2,10 +2,23 @@
 Run: `python3 -m http.server 8000 --bind 0.0.0.0` in this folder, open http://localhost:8000 (or http://<PC-LAN-IP>:8000 on a phone on the same Wi-Fi). Live: https://leck-games.github.io/sinerally/
 
 **Keys:** WASD/arrows drive · Space handbrake/drift · Shift boost · Q/E pitch in the air · R reset · M or Tab world map · V next vehicle · G cycle GFX · F fps/debug · Esc close map/menu.
-**Touch:** left joystick steer (+ up/down = air pitch), GAS/BRAKE/BOOST/DRIFT, ☰ menu (vehicle, assists, time, weather, graphics), tap the minimap for the world map, optional Tilt.
+**Touch:** left joystick steer (+ up/down = air pitch), GAS/BRAKE/BOOST/DRIFT, ☰ menu (vehicle, assists, time, weather, graphics, engine sound), tap the minimap for the world map, optional Tilt.
 **URL options:** `?q=low|med|high` force GFX · `?dyn=0` disable dynamic resolution · `?tod=0..1` fix time of day (0.5 = noon) · `?wx=clear|rain|fog|dust` · `?auto=1|drift|boost` self-driving test · `?dbg` · `?nopost` (debug).
 
-## Free-roam release (this version)
+## Engine sound (plugin API v1)
+- **Engine sound is back, as a plugin.** The game hosts *Engine Sound Plugins*: plain ES modules with
+  `create(ctx, destination, options) → { update(telemetry, dt), event(name, data), dispose() }`. Maker docs:
+  [`PLUGIN_API.md`](PLUGIN_API.md); module overview: [`MODULE_API.md`](MODULE_API.md).
+- Built in: **Engine Sim** (`plugins/enginesim/`, vendored from
+  [sinerally-enginesim](https://github.com/leck-games/sinerally-enginesim), 11 presets, AudioWorklet) and a ~45-line
+  **example** (`plugins/example-simple-engine.js`).
+- **☰ menu → ENGINE SOUND:** pick plugin, preset (remembered per vehicle; defaults buggy Boxer-4, truck V8, quad dirt
+  bike), volume, mute, or load your own script by **https URL** or **local .js file**. Bad scripts fall back to Engine Sim
+  with the error shown. 🔊 top button: first tap enables sound, then toggles mute. Settings in `localStorage`.
+- ⚠ Custom scripts run with full page privileges – only load code you trust.
+- Test: `node tools/test-sound.cjs` (see PLUGIN_API.md §7). Screenshots: `shots/sound_*.png`.
+
+## Free-roam release
 - **Comic style everywhere, including Low on phones:** every level now runs the ink post pass (depth + normal edges, posterize,
   halftone/grain) with harder 3-step cel bands, blue-violet shadow tint, stronger hatching, a silhouette ink rim on objects and
   a punchier palette. Edges fade with distance so the horizon stays clean. See `shots/next_1_style_before_after.png`.
@@ -25,7 +38,7 @@ Run: `python3 -m http.server 8000 --bind 0.0.0.0` in this folder, open http://lo
   minimap and world map, and discovered vistas can be teleported to from the world map.
 - **World map** (M/Tab or tap the minimap): hillshade map with roads and vistas, zoom, tap to set a waypoint (HUD arrow +
   distance); physics pause while it is open.
-- **Audio:** not included – built separately. The vehicle exposes read-only telemetry at `window.SR.telemetry` (see `MERGE_NOTES.md`).
+- **Audio:** see *Engine sound* above. The vehicle exposes read-only telemetry at `window.SR.telemetry` (see `MERGE_NOTES.md`).
 - Screenshots: `shots/next_*.png`.
 
 ## Merged build (previous version)

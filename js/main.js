@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import * as W from './world.js';
 import { Vehicle, CFG, VEHICLES } from './vehicle.js';
+import { createEngineAudio } from './engine-audio.js'; // engine sound plugin host (PLUGIN_API.md); talks to plugins only via the API
 import { createRoads } from './roads.js';
 import { createGrass } from './grass.js';
 import { U, gridTerrainMat, waterMat, objMat, skyMat, puffMat, decalMat, postMat, roadMat, precipMat } from './shaders.js';
@@ -468,23 +469,27 @@ function buildMenu() {
   for (const [label, opts, get, set] of rows) { const r = document.createElement('div'); r.className = 'mrow'; r.innerHTML = `<span>${label}</span>`;
     for (const o of opts) { const b = document.createElement('button'); b.className = 'sb' + (get() === o ? ' sel' : ''); b.textContent = o.toUpperCase(); b.onclick = () => { set(o); buildMenu(); }; r.appendChild(b); } el.appendChild(r); }
 }
-function openMenu(o) { $('menu').style.display = o ? 'block' : 'none'; if (o) buildMenu(); }
+function openMenu(o) { $('menu').style.display = o ? 'block' : 'none'; if (o) { buildMenu(); audio.buildMenu($('mSnd')); } else sndBtn(); }
 $('tMenu').onclick = () => openMenu($('menu').style.display !== 'block'); $('mnClose').onclick = () => openMenu(false);
 $('mini').addEventListener('click', () => openMap(true)); $('mClose').onclick = () => openMap(false); $('mClr').onclick = () => setWp(null);
 $('mZin').onclick = () => { mapSpan = Math.max(1500, mapSpan / 2); openMap(true); }; $('mZout').onclick = () => { mapSpan = Math.min(20000, mapSpan * 2); openMap(true); };
 addEventListener('keydown', e => { if (e.code === 'KeyM' || e.code === 'Tab') { openMap(!mapOpen); e.preventDefault(); } if (e.code === 'Escape') { openMap(false); openMenu(false); } if (e.code === 'KeyV') setVehicle(vName === 'buggy' ? 'truck' : vName === 'truck' ? 'quad' : 'buggy'); });
 // ---------- telemetry + event hooks for a later audio module (read-only; see MERGE_NOTES.md) ----------
 const listeners = {}; function fire(type, data) { (listeners[type] || []).forEach(f => { try { f(data); } catch (e) { console.warn(e); } }); }
-const TEL = { rpm: 0, idle: 0, redline: 0, throttle: 0, brake: 0, boost: false, nitro: 1, gear: 1, shifting: false, load: 0, speed: 0, fwdSpeed: 0, grounded: 0, air: 0,
-  surface: 'grass', wheels: [0, 1, 2, 3].map(() => ({ contact: false, surface: 'grass', slipRatio: 0, slipAngle: 0, load: 0 })), vehicle: 'buggy', paused: false };
+const TEL = { rpm: 0, idle: 0, redline: 0, throttle: 0, brake: 0, boost: false, nitro: 1, gear: 1, gears: 6, shifting: false, load: 0, speed: 0, fwdSpeed: 0, grounded: 0, air: 0,
+  surface: 'grass', wheels: [0, 1, 2, 3].map(() => ({ contact: false, surface: 'grass', slipRatio: 0, slipAngle: 0, load: 0 })), vehicle: 'buggy', soundPreset: 'boxer4', paused: false };
 function updateTelemetry(boosting) {
   const t = TEL, c = veh.c; t.rpm = veh.rpm; t.idle = c.idle; t.redline = c.redline; t.throttle = veh.thr || 0; t.brake = veh.brk || 0; t.boost = boosting; t.nitro = veh.boost;
-  t.gear = veh.gear; t.shifting = veh.shift > 0; t.load = veh.load || 0; t.speed = veh.v.length(); t.fwdSpeed = veh.v.dot(veh.fwd); t.grounded = veh.grounded; t.air = veh.air;
-  t.surface = W.SURF_NAMES[veh.wheels[2].surf]; t.vehicle = vName; t.paused = mapOpen;
+  t.gear = veh.gear; t.gears = c.gears.length; t.shifting = veh.shift > 0; t.load = veh.load || 0; t.speed = veh.v.length(); t.fwdSpeed = veh.v.dot(veh.fwd); t.grounded = veh.grounded; t.air = veh.air;
+  t.surface = W.SURF_NAMES[veh.wheels[2].surf]; t.vehicle = vName; t.soundPreset = c.soundPreset; t.paused = mapOpen;
   veh.wheels.forEach((wh, i) => { const o = t.wheels[i]; o.contact = wh.contact; o.surface = W.SURF_NAMES[wh.surf]; o.slipRatio = wh.sl; o.slipAngle = wh.sa; o.load = wh.load; });
 }
 const roProxy = o => new Proxy(o, { set() { return false; }, get(t, k) { const v = t[k]; return v && typeof v === 'object' ? roProxy(v) : v; } });
 window.SR = Object.freeze({ telemetry: roProxy(TEL), on(type, fn) { (listeners[type] || (listeners[type] = [])).push(fn); }, off(type, fn) { const l = listeners[type]; if (l) l.splice(l.indexOf(fn) >>> 0, 1); } });
+// engine sound: the host only reads window.SR (telemetry + events), the plugin only sees the API v1 telemetry
+const audio = createEngineAudio({ sr: window.SR });
+const sndBtn = () => { $('tSnd').textContent = audio.muted ? '🔇' : '🔊'; };
+$('tSnd').onclick = () => { if (!audio.running) { audio.unlock(); audio.setMuted(false); } else audio.setMuted(!audio.muted); sndBtn(); }; sndBtn(); // first tap = enable sound
 
 // ---------- loop ----------
 const camPos = new THREE.Vector3(veh.p.x, veh.p.y + 6, veh.p.z - 12), look = new THREE.Vector3(), camDir = new THREE.Vector3(0, 0, 1);
@@ -501,7 +506,7 @@ applyQuality(); updateWorld(true);
 function frame(now) {
   requestAnimationFrame(frame); const t0 = performance.now(); let dt = Math.min(0.1, (now - last) / 1000); last = now; tFrame += dt; U.uTime.value = tFrame; renderer.info.reset();
   dynRes(dt);
-  if (mapOpen) { drawMap(); last = now; return; } // world map pauses the game
+  if (mapOpen) { drawMap(); audio.frame(dt, true); last = now; return; } // world map pauses the game
   readInput(dt);
   acc += dt; let steps = 0; const tp = performance.now();
   while (acc >= STEP && steps < 12) { simT += STEP; veh.step(STEP, inp); veh.collideCircles(colliders); checkBreak(); acc -= STEP; steps++; }
@@ -556,7 +561,7 @@ function frame(now) {
   $('spd').textContent = Math.abs(Math.round(veh.v.dot(veh.fwd) * 3.6)); $('bar').style.width = (veh.boost * 100) + '%';
   $('air').textContent = veh.air > 0.5 ? 'AIR ' + veh.air.toFixed(1) + 's!' : '';
   if (msgT > 0 && (msgT -= dt) <= 0) $('msg').textContent = '';
-  minimap(Math.atan2(camDir.x, camDir.z)); gauge(); tickWp(Math.atan2(camDir.x, camDir.z)); updateTelemetry(boosting);
+  minimap(Math.atan2(camDir.x, camDir.z)); gauge(); tickWp(Math.atan2(camDir.x, camDir.z)); updateTelemetry(boosting); audio.frame(dt);
   if (!QS.has('nopost')) { renderer.setRenderTarget(rt); renderer.render(scene, camera); renderer.setRenderTarget(null); renderer.render(postScene, postCam); }
   else { renderer.setRenderTarget(null); renderer.render(scene, camera); }
   stats.frameMs = performance.now() - t0;
@@ -564,5 +569,5 @@ function frame(now) {
     if (dbg) { sample(veh.p.x, veh.p.z, SO); $('dbg').textContent = `${fps.toFixed(0)} fps  GFX ${qName}  cpu ${stats.frameMs.toFixed(1)}ms (phys ${stats.physMs.toFixed(1)})\ncalls ${renderer.info.render.calls} tris ${(renderer.info.render.triangles / 1000).toFixed(0)}k\n${veh.p.x.toFixed(0)},${veh.p.z.toFixed(0)} y${veh.p.y.toFixed(0)} ${W.REG_NAMES[SO.dom]}\ngear ${veh.gear} rpm ${veh.rpm.toFixed(0)} wheels ${veh.grounded}`; } }
 }
 requestAnimationFrame(frame);
-window.__st = { veh, stats, inp, W, get q() { return qName; }, setQ(q) { qName = q; applyQuality(); }, get x() { return veh.p.x; }, get z() { return veh.p.z; }, get y() { return veh.p.y; }, teleport(x, z, yaw = 0) { spawn(x, z, yaw); updateWorld(true); updateCans(true); },
+window.__st = { veh, stats, inp, W, audio, get q() { return qName; }, setQ(q) { qName = q; applyQuality(); }, get x() { return veh.p.x; }, get z() { return veh.p.z; }, get y() { return veh.p.y; }, teleport(x, z, yaw = 0) { spawn(x, z, yaw); updateWorld(true); updateCans(true); },
   gone, get brk() { return brk; }, setVehicle, get vName() { return vName; }, openMap, setWp, get wx() { return wx; }, set tod(v) { tod = v; timeMode = 'Fixed'; }, get dynS() { return dynS; } };

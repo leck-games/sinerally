@@ -22,17 +22,17 @@ export const CFG = {
   brakeF: 3000, brakeR: 2000, hand: 6000, maxSteer: 0.6, steerSpeed: 0.035, steerRate: 3.2,
   cdA: 1.1, airPitch: 9000, airRoll: 3600, airYaw: 2500, boostPush: 5000, boostTorque: 1.5,
   assistGround: 2.2, assistAir: 1.2, // righting torque per kg per rad (roughly)
-  name: 'BUGGY', vmax: 50, // above vmax (m/s) extra drag kicks in (terminal speed cap)
+  name: 'BUGGY', soundPreset: 'boxer4', vmax: 50, // above vmax (m/s) extra drag kicks in (terminal speed cap)
 };
 // selectable vehicles (FUEL-style garage): same model, different physical parameters
 const scaleTq = (t, k) => t.map(([r, v]) => [r, v * k]);
 export const VEHICLES = {
   buggy: CFG,
-  truck: { ...CFG, name: 'TRUCK', mass: 2300, dims: [2.2, 1.9, 5.0], wheelR: 0.52, rest: 0.7, k: 76000, cBump: 5600, cReb: 8000, arbF: 26000, arbR: 18000,
+  truck: { ...CFG, name: 'TRUCK', soundPreset: 'muscleV8', mass: 2300, dims: [2.2, 1.9, 5.0], wheelR: 0.52, rest: 0.7, k: 76000, cBump: 5600, cReb: 8000, arbF: 26000, arbR: 18000,
     wheelI: 2.6, hard: [[1.05, -0.1, 1.65], [-1.05, -0.1, 1.65], [1.05, -0.1, -1.6], [-1.05, -0.1, -1.6]], torque: scaleTq(CFG.torque, 1.65),
     gears: [3.3, 2.15, 1.55, 1.2, 0.95, 0.78], final: 3.9, brakeF: 4600, brakeR: 3200, hand: 9000, maxSteer: 0.55, steerRate: 2.6, steerSpeed: 0.04,
     cdA: 1.6, airPitch: 13000, airRoll: 5500, airYaw: 3800, boostPush: 7400, vmax: 46, split: 0.5 },
-  quad: { ...CFG, name: 'QUAD', mass: 820, dims: [1.6, 1.3, 3.0], wheelR: 0.4, rest: 0.5, k: 30000, cBump: 2200, cReb: 3100, arbF: 8000, arbR: 5000,
+  quad: { ...CFG, name: 'QUAD', soundPreset: 'dirtbike', mass: 820, dims: [1.6, 1.3, 3.0], wheelR: 0.4, rest: 0.5, k: 30000, cBump: 2200, cReb: 3100, arbF: 8000, arbR: 5000,
     wheelI: 0.9, hard: [[0.78, -0.08, 1.08], [-0.78, -0.08, 1.08], [0.78, -0.08, -1.02], [-0.78, -0.08, -1.02]], torque: scaleTq(CFG.torque, 0.66),
     idle: 1100, redline: 8500, up: 7400, down: 3600, torqueRpm: 1.2, gears: [3.1, 2.1, 1.55, 1.2, 0.98], final: 3.4, brakeF: 1800, brakeR: 1200, hand: 3400,
     maxSteer: 0.68, steerRate: 4.2, steerSpeed: 0.03, cdA: 0.75, airPitch: 5200, airRoll: 2100, airYaw: 1500, boostPush: 3000, vmax: 52, split: 0.4 },

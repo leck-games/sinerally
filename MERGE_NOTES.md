@@ -1,8 +1,22 @@
 # Merge notes
 
-## Audio / engine-sim (not in this repo yet)
-Audio was deliberately **dropped** from this build. Sound and the engine simulation are built by a separate worker in their own
-project and will be merged later. The game contains **no WebAudio code**. Instead, it exposes a clean read-only hook:
+## Audio / engine-sim — merged as a plugin (2026-10-24)
+- `js/engine-audio.js` is the **plugin host** (the only WebAudio code in the game): AudioContext unlock on the first
+  gesture, master gain/mute/pause-duck + limiter, loading/validation/fallback, menu section, and the mapping from the
+  `window.SR` hook below to the plugin telemetry contract (`PLUGIN_API.md`). `main.js` calls only
+  `createEngineAudio({ sr: window.SR })`, `audio.frame(dt, paused)` and `audio.buildMenu(el)`.
+- **Engine Sim is vendored**, not loaded cross-repo: `tools/sync-enginesim.sh` copies `plugin.js engine-sim.js
+  engine-dsp.js engine-config.js motor.js` from `../engine-sim/js` into `plugins/enginesim/` and writes the source commit
+  to `plugins/enginesim/VERSION`. Why: pinned, reviewed version (a push to the sim repo can't break the game); the
+  AudioWorklet file must be served next to `engine-sim.js` from the same origin; works offline/locally; both repos
+  are on `leck-games.github.io` anyway, so there is no CDN gain. The sim repo remains the single source of truth –
+  never edit `plugins/enginesim/` here, change `js/plugin.js` there and re-sync.
+- Vehicles: `soundPreset` in `js/vehicle.js` (buggy `boxer4`, truck `muscleV8`, quad `dirtbike`) → `SR.telemetry.soundPreset`.
+  `SR.telemetry.gears` added. Optional `engine:temp` (°C) from the physics module is passed on as `engineTemp`.
+- Plugins must not import game code; the game must not import plugin internals (only by URL through the host).
+
+### Original hook (still the host's only input)
+The game exposes a clean read-only hook:
 
 ```js
 const t = window.SR.telemetry;   // live, read-only (Proxy: writes are ignored), updated every rendered frame
