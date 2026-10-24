@@ -41,8 +41,13 @@ export function trackW(x, z) { // 1 on track, smooth falloff
   const s = 1 - (d - HW) / (BLEND - HW); return s * s * (3 - 2 * s);
 }
 export function height(x, z) {
-  const h = hRaw(x, z), w = trackW(x, z);
-  let y = w > 0 ? h + (Math.max(hLow(x, z), 3) - h) * w : h;
+  const h = hRaw(x, z), t = nearTrack(x, z), dx = x - t.cx, dz = z - t.cz;
+  const d = Math.abs(Math.hypot(dx, dz) - trackR(t, Math.atan2(dz, dx)));
+  let y = h;
+  if (d < 260) { // flatten toward smooth bed; embankment width grows with cut depth -> no sheer canyons
+    const tgt = Math.max(hLow(x, z), 3), diff = Math.abs(h - tgt), bl = BLEND + diff * 1.6;
+    if (d < bl) { let s = d < HW ? 1 : 1 - (d - HW) / (bl - HW); s = s * s * (3 - 2 * s); y = h + (tgt - h) * s; }
+  }
   const e = Math.max(Math.abs(x), Math.abs(z)) - WORLD; // world rim walls of mountains
   if (e > 0) y += e * 0.6;
   return y;
@@ -64,3 +69,7 @@ export function colour(x, z, y, ny, out) {
   out[0] = r; out[1] = g; out[2] = b;
 }
 export function hash2(i, j, k) { return hash(i, j, k); }
+export function trackSD(x, z) { // signed radial distance to nearest track centre-line
+  const t = nearTrack(x, z), dx = x - t.cx, dz = z - t.cz;
+  return Math.hypot(dx, dz) - trackR(t, Math.atan2(dz, dx));
+}

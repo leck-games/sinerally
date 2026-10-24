@@ -9,3 +9,20 @@ Controls: WASD/arrows drive, Space drift (handbrake), Shift boost, R reset, F fp
 - Rendering: a 144×144 grid (8 m spacing, ~1.15 km) snaps to the player and its vertices are recomputed from `height()`; fog hides the edge. Trees/rocks: hash per 14 m cell → 3 InstancedMeshes. ~11 draw calls total.
 - Physics uses the same `height()`: 4 wheel samples → ground plane, spring/damper, ballistic flight off crests (airtime refills boost), lateral grip (low when drifting), tree/rock circle collisions.
 - Race: 8 gates on the nearest track (white = start). Drive through start → checkpoints in order → back to start. Best laps in localStorage (`sinerally_best`). World is ±10 km (rising rim beyond).
+
+## Comic / cel-shaded rendering (v2)
+- `js/shaders.js` – every material is a custom ShaderMaterial sharing one `COMIC` GLSL chunk:
+  3-band cel lighting with a hard terminator and cool shadow tint, screen-space hatching / crosshatching
+  in shadows, atmospheric tint toward the horizon colour (no grey fog).
+- Terrain shader: grass patches, sand ripples, sandstone strata, sine snow line, dirt tracks with tyre ruts
+  (from `trackSD`, the signed distance to the nearest sine track). Water shader: shore foam rings and depth
+  colour derived from the same `height()` function, toon specular glints.
+- Sky: posterized gradient, inked sun, procedural flat clouds with outlines.
+- Post pass (Med/High): ink outlines from depth Laplacian + normal-code edges, slight posterize, saturation,
+  halftone dots in darks, paper grain, speed lines on boost, vignette.
+- `js/models.js` – code-built low-poly buggy (roll cage, steering wheels with suspension travel), tree and
+  rock variants, gates / tyre stacks / signs along tracks. Scenery sways in the wind.
+- Quality toggle: `GFX` button or `G` key cycles Low / Med / High (saved in localStorage).
+  Low = pixel ratio 1, no post pass, inverted-hull outlines; Med (mobile default) = 1.25, post pass;
+  High (desktop default) = 1.5, post pass, longer scenery radius. ~17 draw calls.
+- Tracks now blend into the terrain with embankments that widen with cut depth (no sheer canyon walls).
