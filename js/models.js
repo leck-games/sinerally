@@ -35,6 +35,18 @@ export function rockVariants() {
   const b = merge([P(ico(1.6), 0xb3a58f, [0, 1.6, 0], [.3, 0, .2], [1, 2, 1]), P(ico(1.1), 0x9f9380, [1.2, .7, 0], [0, 1, 0], [1, 1.3, 1])]);
   return [a, b];
 }
+// ---- saguaro cactus + dead desert shrub (dunes / canyon regions of the engine world) ----
+export function cactusVariants() {
+  const G = 0x4fa04a, G2 = 0x3d8a3c, F = 0xffd23c;
+  const sag = merge([P(cyl(.42, .5, 5, 7), G, [0, 2.5, 0]), P(new THREE.SphereGeometry(.42, 7, 4, 0, 6.3, 0, 1.6), G, [0, 5, 0]),
+    P(cyl(.26, .3, 1.3, 6), G2, [.75, 2.2, 0], [0, 0, 1.57]), P(cyl(.26, .3, 1.9, 6), G2, [1.35, 3.0, 0]), P(new THREE.SphereGeometry(.26, 6, 3, 0, 6.3, 0, 1.6), G2, [1.35, 3.95, 0]),
+    P(cyl(.24, .28, 1.0, 6), G2, [-.62, 3.1, 0], [0, 0, -1.57]), P(cyl(.24, .28, 1.4, 6), G2, [-1.1, 3.7, 0]), P(new THREE.SphereGeometry(.24, 6, 3, 0, 6.3, 0, 1.6), G2, [-1.1, 4.4, 0]),
+    P(ico(.18), F, [0, 5.45, 0])]);
+  const D = 0x8a6a48;
+  const shrub = merge([P(cyl(.08, .14, 1.6, 4), D, [0, .8, 0], [0, 0, .3]), P(cyl(.07, .1, 1.4, 4), D, [.3, .7, .2], [.5, 0, -.6]), P(cyl(.07, .1, 1.3, 4), D, [-.3, .7, -.1], [-.4, 0, .7]),
+    P(ico(.7), 0x9a9a52, [0, 1.5, 0], [0, 0, 0], [1.2, .7, 1.2]), P(ico(.5), 0xa8a860, [.5, 1.1, .3], [0, 0, 0], [1, .7, 1])]);
+  return [sag, shrub];
+}
 // ---- buggy: body (merged) + 4 wheels ----
 export function buggy() {
   const O = 0xff6a1a, D = 0x5a5a66, Y = 0xffd23c, W = 0xf4efe0, B = 0x3a3a46;

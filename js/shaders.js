@@ -76,13 +76,20 @@ export function terrainMat() {
       }` });
 }
 // water shares the terrain grid; position.y = terrain height -> depth & shore foam from height()
-export function waterMat() {
-  return new THREE.ShaderMaterial({ uniforms: U,
+export function waterMat({ far = false, uNear = null } = {}) { // far: engine far grid, discarded where the near grid has water
+  return new THREE.ShaderMaterial({ uniforms: far ? { ...U, uNear } : U,
     vertexShader: `uniform float uTime; varying vec3 vW; varying float vD;
       void main(){ vec4 w = modelMatrix * vec4(position,1.); vD = -w.y; w.y = 0.05 * sin(w.x*0.2 + uTime) ; vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+    defines: far ? { FAR: 1 } : {},
     fragmentShader: COMIC + `varying vec3 vW; varying float vD;
+      #ifdef FAR
+        uniform vec3 uNear;
+      #endif
       void main(){
         if (vD < -0.3) discard;
+        #ifdef FAR
+          vec2 dd = abs(vW.xz - uNear.xy); if (max(dd.x, dd.y) < uNear.z - 2.) discard;
+        #endif
         float d = max(vD, 0.);
         vec3 c = mix(vec3(.35,.88,.92), vec3(.10,.42,.82), smoothstep(0.5, 8., d));
         c = mix(c, vec3(.05,.28,.65), smoothstep(10., 30., d));
@@ -213,6 +220,7 @@ export function postMat() {
         float na = max(max(abs(al - a0), abs(ar - a0)), max(abs(ad - a0), abs(au - a0)));
         float en = smoothstep(0.04, 0.08, na);
         float e = max(ed, en) * (1. - smoothstep(250., 600., dc));
+        float amin = min(min(min(al, ar), min(ad, au)), a0); e *= mix(1., 0.12, step(amin, 0.03)); // grass (alpha 0) gets only faint ink
         vec3 c = c0.rgb;
         float L = dot(c, vec3(.299,.587,.114));
         c = mix(vec3(L), c, 1.18);                                       // saturate
@@ -233,4 +241,58 @@ export function postMat() {
         c *= 1. - 0.25 * smoothstep(0.55, 1.0, r);                        // vignette
         gl_FragColor = vec4(c, 1.);
       }` });
+}
+
+// ---------------- engine terrain (merged build): region vertex colours + procedural comic detail ----------------
+// attributes: color = region/surface albedo from world.colourOf(), sw = (sand, rock, snow, dirt) surface weights.
+// FAR variant sinks vertices lying under the near grid (uNear = centre.xz, half-size).
+export function gridTerrainMat({ far = false, uNear = null } = {}) {
+  return new THREE.ShaderMaterial({ uniforms: far ? { ...U, uNear } : U, vertexColors: true, defines: far ? { FAR: 1 } : {},
+    vertexShader: `attribute vec4 sw; varying vec3 vW; varying vec3 vN; varying vec3 vC; varying vec4 vS;
+      #ifdef FAR
+        uniform vec3 uNear;
+      #endif
+      void main(){ vec3 p = position;
+        #ifdef FAR
+          vec2 dd = abs(p.xz - uNear.xy); float m = max(dd.x, dd.y); p.y -= 8.0 * clamp((uNear.z - 10.0 - m) / 10.0, 0.0, 1.0);
+        #endif
+        vW = p; vN = normal; vC = color; vS = sw; gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.); }`,
+    fragmentShader: COMIC + `varying vec3 vW; varying vec3 vN; varying vec3 vC; varying vec4 vS;
+      void main(){
+        vec3 N = normalize(vN); float x = vW.x, z = vW.z, h = vW.y;
+        vec3 c = vC;
+        float gW = clamp(1. - vS.x - vS.y - vS.z - vS.w, 0., 1.);
+        float pat = sin(x*0.09 + sin(z*0.07)*2.) * sin(z*0.08 + sin(x*0.05)*2.);      // painterly grass patches
+        float spk = sin(x*1.7 + sin(z*1.3)) * sin(z*1.9 + sin(x*1.1));                // speckle
+        vec3 m = vec3(1.);
+        m = mix(m, mix(vec3(1.), vec3(.84,.92,.74), step(0.35, pat)) * mix(1., 1.18, step(0.93, spk)), gW);
+        float rip = sin(x*2.2 + z*1.1 + sin(z*0.3)*3.);                                   // sand ripples
+        m = mix(m, vec3(mix(1.04, .88, smoothstep(0.7, 0.9, rip))), vS.x);
+        float sb = h * 0.55 + sin(x*0.03) * 2.5 + cos(z*0.025) * 2.5;                     // rock strata
+        vec3 st = vec3(mix(1.06, .9, step(0.5, fract(sb * 0.5))));
+        st = mix(st, vec3(.55,.5,.5), smoothstep(0.88, 0.97, fract(sb)));
+        st = mix(st, vec3(1.15,1.1,1.0), step(0.8, fract(sb*0.23)) * 0.7);
+        m = mix(m, st, vS.y);
+        m = mix(m, mix(vec3(1.), vec3(.84,.9,1.05), step(0.6, sin(x*0.3+z*0.2+sin(z*0.1)*3.))), vS.z);   // snow drifts
+        float dk = step(0.6, sin(x*0.4 + z*0.33 + sin(z*0.2)*2.));                        // dirt clods
+        m = mix(m, vec3(mix(1.0, .88, dk) * mix(1., 1.14, step(0.9, spk))), vS.w);
+        c *= m;
+        float wet = 1. - smoothstep(0.0, 0.8, h); c = mix(c, c * vec3(.7,.75,.8), wet);
+        gl_FragColor = vec4(comic(c, N, vW, 1.0), ncode(N));
+      }` });
+}
+// textured road ribbons (asphalt / dirt) and flat-shaded bridge pieces, comic lit
+export function roadMat(map, { offset = -2, col = 0x9a9aa2 } = {}) {
+  return new THREE.ShaderMaterial({ uniforms: { ...U, map: { value: map }, uCol: { value: new THREE.Color(col) } }, defines: map ? { MAP: 1 } : {},
+    polygonOffset: !!map, polygonOffsetFactor: offset, polygonOffsetUnits: offset * 2,
+    vertexShader: `varying vec3 vW; varying vec3 vN; varying vec2 vUv;
+      void main(){ vUv = uv; vec4 w = modelMatrix * vec4(position,1.); vW = w.xyz; vN = normalize(mat3(modelMatrix) * normal); gl_Position = projectionMatrix * viewMatrix * w; }`,
+    fragmentShader: COMIC + `uniform sampler2D map; uniform vec3 uCol; varying vec3 vW; varying vec3 vN; varying vec2 vUv;
+      void main(){ vec3 N = normalize(vN);
+        #ifdef MAP
+          vec3 c = texture2D(map, vUv).rgb; float hk = 0.5;
+        #else
+          vec3 c = uCol; float hk = 1.2;
+        #endif
+        gl_FragColor = vec4(comic(c, N, vW, hk), ncode(N)); }` });
 }

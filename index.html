@@ -6,6 +6,7 @@
 <style>
 html,body{margin:0;height:100%;overflow:hidden;background:#f7e6b5;font-family:"Arial Black","Impact",system-ui,sans-serif;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 canvas{display:block}
+body>canvas:first-child{background:#000} /* WebGL alpha carries the ink-edge code; black backing keeps colours exact in Low (no post) */
 .ink{color:#fff;-webkit-text-stroke:1.5px #111;text-shadow:3px 3px 0 #111;font-style:italic}
 #hud{position:fixed;top:max(6px,env(safe-area-inset-top));left:max(10px,env(safe-area-inset-left));right:max(10px,env(safe-area-inset-right));display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none}
 #spdbox{display:flex;align-items:baseline;gap:6px}#spd{font-size:40px;line-height:1}#unit{font-size:14px}
@@ -25,6 +26,8 @@ canvas{display:block}
 #bBst{right:calc(max(22px,env(safe-area-inset-right)) + 14px);bottom:116px;background:#ff8a1a}#bDrf{right:calc(max(22px,env(safe-area-inset-right)) + 104px);bottom:104px;background:#3c7ce8}
 #msg{position:fixed;top:36%;width:100%;text-align:center;font-size:44px;pointer-events:none}
 .pop{animation:pop .35s ease-out}@keyframes pop{0%{transform:scale(2.2) rotate(-6deg)}100%{transform:scale(1) rotate(-3deg)}}
+#gauge{position:fixed;left:50%;bottom:calc(4px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);pointer-events:none;filter:drop-shadow(3px 3px 0 #1116)}
+@media (max-height:420px){#gauge{width:160px;height:96px}}
 #rot{position:fixed;inset:0;background:#ffd23c;color:#111;display:none;align-items:center;justify-content:center;font-size:22px;z-index:9}
 @media (orientation:portrait) and (pointer:coarse){#rot{display:flex}}
 </style></head><body>
@@ -35,6 +38,7 @@ canvas{display:block}
 <div id="dbg"></div>
 <div id="joy"><div id="knob"></div></div>
 <div class="btn" id="bGas">GAS</div><div class="btn" id="bBrk">BRAKE</div><div class="btn" id="bBst">BOOST</div><div class="btn" id="bDrf">DRIFT</div>
+<canvas id="gauge" width="200" height="120"></canvas>
 <div id="msg" class="ink"></div><div id="rot">ROTATE TO LANDSCAPE ↻</div>
 <script type="importmap">{"imports":{"three":"./js/three.module.js"}}</script>
 <script type="module" src="js/main.js"></script>
