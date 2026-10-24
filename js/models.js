@@ -93,3 +93,53 @@ export function trackProps(cps, heightFn) {
   });
   return merge(parts);
 }
+// ---- trophy truck: metres, ground y=0, wheel centres (+-1.05, .64, +1.65/-1.6) ----
+export function truck() {
+  const T = 0x1fa3a0, D = 0x2b2f3a, Y = 0xffd23c, W = 0xf4efe0, G = 0x9fd8ff;
+  const parts = [
+    P(box(1.8, .35, 4.6), D, [0, .78, 0]),                                                   // frame
+    P(box(2.0, .55, 1.7), T, [0, 1.15, 1.55]), P(box(1.9, .25, .5), T, [0, 1.05, 2.45], [-.4, 0, 0]),   // hood + nose
+    P(box(1.95, .9, 1.5), T, [0, 1.75, .05]), P(box(1.7, .6, .1), G, [0, 1.85, .82], [-.35, 0, 0]),    // cab + windscreen
+    P(box(1.96, .5, .1), G, [0, 1.85, -.7]), P(box(.06, .45, 1.1), G, [1.0, 1.85, .05]), P(box(.06, .45, 1.1), G, [-1.0, 1.85, .05]),
+    P(box(2.0, .1, 1.6), D, [0, 2.24, .0]),                                                   // roof
+    P(box(1.6, .22, .25), Y, [0, 2.4, .45]), ...[-.6, -.2, .2, .6].map(x => P(box(.28, .2, .08), W, [x, 2.4, .6])), // light bar
+    P(box(2.0, .5, 1.9), T, [0, 1.1, -1.55]), P(box(1.7, .12, 1.7), D, [0, 1.36, -1.55]),      // bed
+    P(cyl(.45, .45, .35, 10), 0x26262c, [0, 1.6, -1.8], [0, 0, Math.PI / 2], [1, 1, 1]),        // spare tyre
+    P(box(2.2, .3, .25), W, [0, .82, 2.55]), P(box(.12, .55, .12), W, [-.6, 1.05, 2.6]), P(box(.12, .55, .12), W, [.6, 1.05, 2.6]), // bull bar
+    P(box(.35, .22, .1), Y, [-.7, 1.25, 2.42]), P(box(.35, .22, .1), Y, [.7, 1.25, 2.42]),     // headlights
+    P(box(.5, .12, 2.0), Y, [1.01, 1.3, .9]), P(box(.5, .12, 2.0), Y, [-1.01, 1.3, .9]),       // racing stripes (side)
+    P(box(2.2, .3, .9), D, [0, .95, 1.65]), P(box(2.2, .3, .9), D, [0, .95, -1.6]),           // fenders
+  ];
+  const wheel = merge([P(cyl(.68, .68, .7, 10), 0x26262c, [0, 0, 0], [0, 0, Math.PI / 2]), P(cyl(.38, .38, .72, 6), 0xd0d4dc, [0, 0, 0], [0, 0, Math.PI / 2]),
+    ...[0, 1, 2, 3, 4, 5].map(i => P(box(.74, .16, .3), 0x3a3a44, [0, Math.cos(i * 1.047) * .66, Math.sin(i * 1.047) * .66], [i * 1.047, 0, 0]))]);
+  const flame = merge([P(cone(.3, 1.6, 6), 0xff7a1a, [0, 0, 0], [-Math.PI / 2, 0, 0]), P(cone(.16, 1.0, 6), 0xfff3a0, [0, 0, .2], [-Math.PI / 2, 0, 0])]);
+  return { body: merge(parts), wheel, flame };
+}
+// ---- quad bike: metres, ground y=0, wheel centres (+-.78, .49, +1.08/-1.02) ----
+export function quad() {
+  const R = 0xe8303a, D = 0x2b2f3a, Y = 0xffd23c, K = 0x1b1b22;
+  const parts = [
+    P(box(.8, .3, 2.2), D, [0, .62, 0]),                                                      // frame
+    P(box(1.5, .14, .8), R, [0, .98, 1.0], [-.12, 0, 0]), P(box(1.5, .14, .8), R, [0, .98, -1.0], [.12, 0, 0]),   // fenders
+    P(box(.7, .45, 1.1), R, [0, 1.0, .35]), P(box(.55, .2, .9), K, [0, 1.28, -.25]),            // tank + seat
+    P(cyl(.04, .04, 1.0, 5), K, [0, 1.42, .72], [0, 0, Math.PI / 2]), P(cyl(.05, .05, .5, 5), K, [0, 1.22, .62], [.3, 0, 0]),   // bars
+    P(box(.8, .14, .3), Y, [0, .85, 1.55]), P(box(.25, .14, .06), 0xfff3c0, [-.2, 1.0, 1.42]), P(box(.25, .14, .06), 0xfff3c0, [.2, 1.0, 1.42]), // bumper + lights
+    P(box(.5, .6, .35), 0x2a6cff, [0, 1.65, -.15], [-.25, 0, 0]), P(ico(.24, 1), Y, [0, 2.12, .0]), P(box(.3, .1, .1), K, [0, 2.12, .2]),  // rider
+    P(box(.14, .5, .14), 0x2a6cff, [-.32, 1.55, .3], [-1.0, 0, -.2]), P(box(.14, .5, .14), 0x2a6cff, [.32, 1.55, .3], [-1.0, 0, .2]),     // arms
+    P(box(.8, .2, .3), D, [0, .9, -1.45]), P(cyl(.07, .07, .5, 6), 0x999aa5, [.3, .85, -1.5], [Math.PI / 2, 0, 0]),                        // rack + exhaust
+  ];
+  const wheel = merge([P(cyl(.68, .68, .8, 10), 0x26262c, [0, 0, 0], [0, 0, Math.PI / 2]), P(cyl(.34, .34, .82, 6), 0xffd23c, [0, 0, 0], [0, 0, Math.PI / 2]),
+    ...[0, 1, 2, 3, 4, 5].map(i => P(box(.84, .14, .26), 0x3a3a44, [0, Math.cos(i * 1.047) * .66, Math.sin(i * 1.047) * .66], [i * 1.047, 0, 0]))]);
+  const flame = merge([P(cone(.2, 1.2, 6), 0xff7a1a, [0, 0, 0], [-Math.PI / 2, 0, 0]), P(cone(.11, .8, 6), 0xfff3a0, [0, 0, .15], [-Math.PI / 2, 0, 0])]);
+  return { body: merge(parts), wheel, flame };
+}
+// ---- FUEL-style jerrycan collectible (~1 m tall, shown scaled up) ----
+export function fuelCan() {
+  return merge([P(box(.7, 1.0, .35), 0xff3b2a, [0, .5, 0]), P(box(.72, .12, .37), 0xffd23c, [0, .5, 0]), P(box(.3, .12, .1), 0x222222, [-.1, 1.06, 0]),
+    P(cyl(.07, .07, .22, 5), 0xffd23c, [.22, 1.1, 0], [0, 0, -.5])]);
+}
+// ---- vista beacon: tall comic marker post with flag ----
+export function beacon() {
+  return merge([P(cyl(.3, .45, 14, 6), 0x333340, [0, 7, 0]), P(box(.12, 2.4, 4), 0xffd23c, [0, 12.6, 2.1]), P(box(.13, .8, 4), 0xff3b2a, [0, 12.6, 2.1]),
+    P(ico(.9, 0), 0xff6a1a, [0, 14.5, 0]), P(cyl(2.2, 2.6, .6, 8), 0x8a8478, [0, .3, 0])]);
+}

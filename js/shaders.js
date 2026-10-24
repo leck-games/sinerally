@@ -5,24 +5,40 @@ export const U = {
   uSun: { value: new THREE.Vector3(0.45, 0.75, 0.35).normalize() },
   uHorizon: { value: new THREE.Color(0xd9f1ff) }, uZenith: { value: new THREE.Color(0x1f74e0) },
   uPx: { value: 1 }, uHatch: { value: 1 }, uFar: { value: 560 }, uTime: { value: 0 },
+  uLight: { value: new THREE.Color(1, 1, 1) }, uAmb: { value: 1 }, uRim: { value: 1 }, uHeadK: { value: 0 },
+  uHeadP: { value: new THREE.Vector3() }, uHeadD: { value: new THREE.Vector3(0, 0, 1) }, uNight: { value: 0 }, uRain: { value: 0 },
 };
 export const COMIC = /* glsl */`
 uniform vec3 uSun; uniform vec3 uHorizon; uniform float uPx; uniform float uHatch; uniform float uFar; uniform float uTime;
+uniform vec3 uLight; uniform float uAmb, uRim, uHeadK; uniform vec3 uHeadP, uHeadD;
+vec3 headLight(vec3 al, vec3 N, vec3 wpos){ // two-beam cone from the car, hard comic falloff
+  vec3 d = wpos - uHeadP; float r = length(d); d /= max(r, 0.001);
+  float c = dot(d, uHeadD); float cone = smoothstep(0.86, 0.9, c); float fall = 1.0 - smoothstep(25.0, 75.0, r);
+  float lam = clamp(dot(N, -d) * 0.6 + 0.4, 0.0, 1.0);
+  float k = cone * fall * lam; k = k > 0.6 ? 1.0 : (k > 0.25 ? 0.6 : (k > 0.05 ? 0.3 : 0.0));
+  return al * vec3(1.0, 0.92, 0.7) * k * 1.1;
+}
 float hatchLine(float c, float w){ float d = abs(fract(c) - 0.5) * 2.0; return 1.0 - smoothstep(w, w + 0.12, 1.0 - d); }
 vec3 comic(vec3 albedo, vec3 N, vec3 wpos, float hatchK){
+  vec3 V = normalize(cameraPosition - wpos);
   float l = dot(N, uSun) * 0.5 + 0.5;               // half-lambert
-  float band = l > 0.58 ? 1.0 : (l > 0.38 ? 0.76 : 0.56); // 3 hard steps
-  vec3 col = albedo * band;
-  col = mix(col, col * vec3(0.72, 0.78, 1.18), (1.0 - band) * 0.9);   // cool shadows
-  col += albedo * 0.12 * clamp(N.y, 0.0, 1.0);        // sky fill
+  float band = l > 0.62 ? 1.04 : (l > 0.42 ? 0.74 : 0.5); // 3 hard steps, strong contrast
+  vec3 al = mix(vec3(dot(albedo, vec3(.299,.587,.114))), albedo, 1.12); // punchier palette
+  vec3 col = al * band * uLight;
+  col = mix(col, col * vec3(0.62, 0.70, 1.25), smoothstep(1.0, 0.5, band) * 0.75);   // cool, saturated shadows
+  col += al * 0.10 * clamp(N.y, 0.0, 1.0) * uAmb;    // sky fill
+  col += uHeadK * headLight(al, N, wpos);           // vehicle headlights (night)
   float dist = length(wpos - cameraPosition);
-  float hf = uHatch * hatchK * (1.0 - smoothstep(40.0, 200.0, dist));
+  float hf = uHatch * hatchK * (1.0 - smoothstep(90.0, 380.0, dist));
   if (hf > 0.001) {
-    vec2 fc = gl_FragCoord.xy / (uPx * 4.0);
-    float w1 = clamp((0.62 - l) * 1.4, 0.0, 0.5), w2 = clamp((0.42 - l) * 1.6, 0.0, 0.5);
+    vec2 fc = gl_FragCoord.xy / (uPx * 3.5);
+    float w1 = clamp((0.66 - l) * 1.6, 0.0, 0.55), w2 = clamp((0.46 - l) * 1.8, 0.0, 0.55);
     float h = max(hatchLine((fc.x + fc.y) * 0.5, 1.0 - w1) * step(0.001, w1), hatchLine((fc.x - fc.y) * 0.5, 1.0 - w2) * step(0.001, w2));
-    col = mix(col, col * 0.35, h * hf);
+    col = mix(col, col * 0.3, h * hf);
   }
+  // ink rim: grazing surfaces (hill silhouettes, object outlines) go black - works without the post pass
+  float ndv = dot(N, V);
+  col = mix(col, vec3(0.04, 0.03, 0.05), (1.0 - smoothstep(0.06, 0.11, ndv)) * (1.0 - smoothstep(0.7, 0.9, abs(N.y))) * (1.0 - smoothstep(40.0, 160.0, dist)) * uRim); // not on flat ground
   float f = smoothstep(uFar * 0.2, uFar, dist);
   return mix(col, uHorizon, f * f * 0.95);
 }
@@ -100,6 +116,7 @@ export function waterMat({ far = false, uNear = null } = {}) { // far: engine fa
         c = mix(c, vec3(1.), step(0.985, sp));          // toon specular glints
         c = mix(c, vec3(.97,1.,1.), foam);
         float dist = length(vW - cameraPosition); float f = smoothstep(uFar*0.2, uFar, dist);
+        c *= uLight; c += uHeadK * headLight(c, vec3(0.,1.,0.), vW);
         gl_FragColor = vec4(mix(c, uHorizon, f*f*0.95), ncode(vec3(0.,1.,0.)) + foam * 0.04);
       }` });
 }
@@ -147,12 +164,20 @@ export function objMat({ wind = 0, unlit = false, hull = 0, gate = false, hatch 
 export function skyMat() {
   return new THREE.ShaderMaterial({ uniforms: U, side: THREE.BackSide, depthWrite: false,
     vertexShader: `varying vec3 vD; void main(){ vD = position; gl_Position = (projectionMatrix * modelViewMatrix * vec4(position,1.)).xyww; }`,
-    fragmentShader: `uniform vec3 uSun, uHorizon, uZenith; uniform float uTime; varying vec3 vD;
+    fragmentShader: `uniform vec3 uSun, uHorizon, uZenith, uLight; uniform float uTime, uNight, uRain; varying vec3 vD;
+      float h31(vec3 p){ return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
       void main(){
         vec3 d = normalize(vD); float y = max(d.y, 0.);
         float t = floor(pow(y, 0.55) * 6. + 0.5) / 6.;                 // posterized gradient bands
         vec3 c = mix(uHorizon, uZenith, t);
-        float s = dot(d, uSun);
+        float s = dot(d, uSun) * (1. - uNight);
+        if (uNight > 0.01) { // stars (comic crosses) + ink-ringed moon opposite the sun direction
+          vec3 g = floor(d * 140.); float st = step(0.996, h31(g)) * smoothstep(0.02, 0.2, d.y);
+          c = mix(c, vec3(1., .97, .85), st * uNight * (1. - uRain));
+          float mo = dot(d, uSun);
+          c = mix(c, vec3(.06,.05,.08), step(0.9975, mo) * uNight);
+          c = mix(c, vec3(.95,.95,.85) - step(0.9993, dot(d, normalize(uSun + vec3(.02,.02,0.)))) * 0.25, step(0.998, mo) * uNight);
+        }
         c = mix(c, vec3(1.,.95,.7), step(0.96, s) * 0.35);
         c = mix(c, vec3(1.,.98,.85), step(0.99, s) * 0.5);
         c = mix(c, vec3(.08,.06,.08), step(0.9965, s) * (1. - step(0.9975, s)));
@@ -163,8 +188,9 @@ export function skyMat() {
           vec2 uv2 = uv - uSun.xz * 0.15;
           float cl2 = sin(uv2.x*1.3 + sin(uv2.y*0.9)*1.5) * sin(uv2.y*1.1 + sin(uv2.x*0.7)) + 0.45 * sin(uv2.x*3.1 + uv2.y*2.3) + 0.25 * sin(uv2.x*6.3 - uv2.y*5.1);
           float fade = smoothstep(0.01, 0.12, d.y);
-          vec3 cc = mix(vec3(.80,.84,.98), vec3(1.), step(cl2, cl - 0.05));
-          float m = step(0.62, cl) * fade;
+          vec3 cc = mix(vec3(.80,.84,.98), vec3(1.), step(cl2, cl - 0.05)) * uLight;
+          cc = mix(cc, vec3(.45,.48,.55) * uLight, uRain);
+          float m = step(0.62 - uRain * 0.9, cl) * fade;
           c = mix(c, cc, m);
           c = mix(c, vec3(.08,.06,.1), (step(0.6, cl) - step(0.64, cl)) * fade);
         }
@@ -182,7 +208,7 @@ export function puffMat() {
         float r = dot(p,p) / (lump * lump); if (r > 1.) discard;
         vec2 g = fract(gl_FragCoord.xy / (uPx * 4.)) - 0.5; if (r > 0.55 && length(g) > 0.62 * (1. - r) + 0.12) discard;
         vec3 N = normalize(vec3(p.x, -p.y, sqrt(1. - r))); N = normalize(inverse(mat3(viewMatrix)) * N);
-        float l = dot(N, uSun); vec3 c = vC * (l > 0.1 ? 1.0 : 0.8); float dist = length(vW - cameraPosition); float f = smoothstep(uFar*0.2, uFar, dist);
+        float l = dot(N, uSun); vec3 c = vC * (l > 0.1 ? 1.0 : 0.8) * uLight; float dist = length(vW - cameraPosition); float f = smoothstep(uFar*0.2, uFar, dist);
         gl_FragColor = vec4(mix(c, uHorizon, f*f), ncode(N)); }` });
 }
 // ---------------- flat dark decal (skids, blob shadow) ----------------
@@ -215,23 +241,23 @@ export function postMat() {
         // laplacian of inverse depth is ~0 on planes -> robust silhouettes/creases
         float ic = 1./dc; float lap = abs(1./dl + 1./dr + 1./dd + 1./du - 4. * ic) / ic;
         float mn = min(min(dl, dr), min(dd, du));
-        float ed = smoothstep(0.02, 0.06, lap);
+        float ed = smoothstep(0.012, 0.035, lap);
         float a0 = c0.a, al = texture2D(tCol, vUv - vec2(px.x,0.)).a, ar = texture2D(tCol, vUv + vec2(px.x,0.)).a, ad = texture2D(tCol, vUv - vec2(0.,px.y)).a, au = texture2D(tCol, vUv + vec2(0.,px.y)).a;
         float na = max(max(abs(al - a0), abs(ar - a0)), max(abs(ad - a0), abs(au - a0)));
-        float en = smoothstep(0.04, 0.08, na);
-        float e = max(ed, en) * (1. - smoothstep(250., 600., dc));
-        float amin = min(min(min(al, ar), min(ad, au)), a0); e *= mix(1., 0.12, step(amin, 0.03)); // grass (alpha 0) gets only faint ink
+        float en = smoothstep(0.03, 0.06, na);
+        float e = max(ed, en) * (1. - 0.8 * smoothstep(90., 450., dc));
+        float amin = min(min(min(al, ar), min(ad, au)), a0); e *= mix(1., 0.04, step(amin, 0.03)); // grass (alpha 0) gets only faint ink
         vec3 c = c0.rgb;
         float L = dot(c, vec3(.299,.587,.114));
-        c = mix(vec3(L), c, 1.18);                                       // saturate
-        c = mix(c, floor(c * 7. + 0.5) / 7., 0.35);                       // slight posterize
+        c = mix(vec3(L), c, 1.18);                                      // saturate
+        c = mix(c, floor(c * 6. + 0.5) / 6., 0.5);                       // slight posterize
         if (uFx > 0.5) {
           vec2 g = gl_FragCoord.xy / (uPx * 4.); g = mat2(.707,-.707,.707,.707) * g; vec2 f = fract(g) - 0.5;
           float dotm = step(length(f), (1. - L) * 0.55) * smoothstep(0.55, 0.25, L);
           c *= 1. - 0.12 * dotm;                                          // halftone in darks
           c *= 0.96 + 0.08 * h21(floor(gl_FragCoord.xy / uPx) + floor(uTime * 12.)); // paper grain
         }
-        c = mix(c, vec3(.06,.04,.07), e);
+        c = mix(c, vec3(.02,.015,.03), min(1., e * 1.3));
         vec2 p = vUv - 0.5; p.x *= uRes.x / uRes.y; float r = length(p);
         if (uBoost > 0.01) {
           float ang = atan(p.y, p.x); float id = floor(ang * 38.);
@@ -295,4 +321,19 @@ export function roadMat(map, { offset = -2, col = 0x9a9aa2 } = {}) {
           vec3 c = uCol; float hk = 1.2;
         #endif
         gl_FragColor = vec4(comic(c, N, vW, hk), ncode(N)); }` });
+}
+
+// ---------------- weather particles: rain streaks / dust specks wrapped in a box around the camera (1 draw call) ----------------
+export function precipMat() {
+  return new THREE.ShaderMaterial({ uniforms: { ...U, uCol: { value: new THREE.Color(0xc8d8ff) }, uVel: { value: new THREE.Vector3(0, -26, 0) }, uBox: { value: 40 }, uLen: { value: 0.06 }, uAmt: { value: 0 } },
+    transparent: true, depthWrite: false,
+    vertexShader: `uniform vec3 uVel; uniform float uBox, uLen, uTime, uAmt; attribute float tail; attribute float seed;
+      void main(){
+        vec3 p = position * uBox + uVel * uTime * (0.8 + 0.4 * fract(seed * 7.13));
+        p = mod(p - cameraPosition + uBox * 0.5, uBox) - uBox * 0.5 + cameraPosition;
+        p -= uVel * uLen * tail;
+        if (seed > uAmt) p = vec3(0., -1e5, 0.);
+        gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.);
+      }`,
+    fragmentShader: `uniform vec3 uCol, uLight; void main(){ gl_FragColor = vec4(uCol * max(uLight, vec3(.35)), 0.55); }` });
 }

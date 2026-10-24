@@ -57,7 +57,7 @@ export function createGrass(scene, grid, { count = 12000, tile = 72 } = {}) {
       varying vec3 vCol; varying float vY; varying vec3 vW;
       void main() {
         // comic grass: 3 hard tone steps root->tip (dark ink-ish roots, bright tips), lit like flat ground, no hatching
-        float t = vY < 0.33 ? 0.62 : (vY < 0.72 ? 0.86 : 1.08);
+        float t = vY < 0.33 ? 0.74 : (vY < 0.72 ? 0.9 : 1.1);
         vec3 c = comic(vCol * t, vec3(0., 1., 0.), vW, 0.0);
         gl_FragColor = vec4(c, 0.); // alpha 0 = grass code: post pass suppresses per-blade ink
       }`,

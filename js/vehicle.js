@@ -22,20 +22,38 @@ export const CFG = {
   brakeF: 3000, brakeR: 2000, hand: 6000, maxSteer: 0.6, steerSpeed: 0.035, steerRate: 3.2,
   cdA: 1.1, airPitch: 9000, airRoll: 3600, airYaw: 2500, boostPush: 5000, boostTorque: 1.5,
   assistGround: 2.2, assistAir: 1.2, // righting torque per kg per rad (roughly)
+  name: 'BUGGY', vmax: 50, // above vmax (m/s) extra drag kicks in (terminal speed cap)
+};
+// selectable vehicles (FUEL-style garage): same model, different physical parameters
+const scaleTq = (t, k) => t.map(([r, v]) => [r, v * k]);
+export const VEHICLES = {
+  buggy: CFG,
+  truck: { ...CFG, name: 'TRUCK', mass: 2300, dims: [2.2, 1.9, 5.0], wheelR: 0.52, rest: 0.7, k: 76000, cBump: 5600, cReb: 8000, arbF: 26000, arbR: 18000,
+    wheelI: 2.6, hard: [[1.05, -0.1, 1.65], [-1.05, -0.1, 1.65], [1.05, -0.1, -1.6], [-1.05, -0.1, -1.6]], torque: scaleTq(CFG.torque, 1.65),
+    gears: [3.3, 2.15, 1.55, 1.2, 0.95, 0.78], final: 3.9, brakeF: 4600, brakeR: 3200, hand: 9000, maxSteer: 0.55, steerRate: 2.6, steerSpeed: 0.04,
+    cdA: 1.6, airPitch: 13000, airRoll: 5500, airYaw: 3800, boostPush: 7400, vmax: 46, split: 0.5 },
+  quad: { ...CFG, name: 'QUAD', mass: 820, dims: [1.6, 1.3, 3.0], wheelR: 0.4, rest: 0.5, k: 30000, cBump: 2200, cReb: 3100, arbF: 8000, arbR: 5000,
+    wheelI: 0.9, hard: [[0.78, -0.08, 1.08], [-0.78, -0.08, 1.08], [0.78, -0.08, -1.02], [-0.78, -0.08, -1.02]], torque: scaleTq(CFG.torque, 0.66),
+    idle: 1100, redline: 8500, up: 7400, down: 3600, torqueRpm: 1.2, gears: [3.1, 2.1, 1.55, 1.2, 0.98], final: 3.4, brakeF: 1800, brakeR: 1200, hand: 3400,
+    maxSteer: 0.68, steerRate: 4.2, steerSpeed: 0.03, cdA: 0.75, airPitch: 5200, airRoll: 2100, airYaw: 1500, boostPush: 3000, vmax: 52, split: 0.4 },
 };
 
 export class Vehicle {
-  constructor() {
-    const c = CFG, m = c.mass, [w, h, l] = c.dims, s = c.inertiaScale;
+  constructor(cfg = CFG) {
+    this.assist = { stab: true, tc: true }; this.gripMul = 1; this.spinT = 0; this.holdT = 0; this.tcCut = 1; this.slipD = 0;
+    this.setCfg(cfg);
+    this.gear = 1; this.rpm = this.c.idle; this.shift = 0; this.steer = 0; this.air = 0; this.airMax = 0; this.boost = 1;
+    this.grounded = 0; this.flipT = 0; this.landing = 0; this.revT = 0; this.vy0 = 0; this.events = [];
+    this._a = V3(); this._b = V3(); this._c = V3(); this._d = V3(); this._e = V3(); this._n = [0, 0, 0];
+  }
+  setCfg(cfg) {
+    const c = this.c = cfg, m = c.mass, [w, h, l] = c.dims, s = c.inertiaScale;
     this.Ib = [s * m / 12 * (h * h + l * l), s * m / 12 * (w * w + l * l), s * m / 12 * (w * w + h * h)]; // about left(x), up(y), fwd(z)
     this.p = V3(); this.v = V3(); this.q = new THREE.Quaternion(); this.w = V3();
     this.left = V3(); this.up = V3(); this.fwd = V3();
     this.F = V3(); this.T = V3();
     this.wheels = c.hard.map((hp, i) => ({ hp: new THREE.Vector3(...hp), front: i < 2, omega: 0, rot: 0, comp: 0, prevComp: 0, contact: false, load: 0,
       sl: 0, sa: 0, surf: 2, pos: V3(), steer: 0, Fx: 0, Fy: 0, n: V3(), cp: V3() }));
-    this.gear = 1; this.rpm = c.idle; this.shift = 0; this.steer = 0; this.air = 0; this.airMax = 0; this.boost = 1;
-    this.grounded = 0; this.flipT = 0; this.landing = 0; this.revT = 0; this.vy0 = 0; this.events = [];
-    this._a = V3(); this._b = V3(); this._c = V3(); this._d = V3(); this._e = V3(); this._n = [0, 0, 0];
   }
   spawn(x, z, yaw) {
     this.p.set(x, ground(x, z) + 1.4, z); this.v.set(0, 0, 0); this.w.set(0, 0, 0);
@@ -44,14 +62,14 @@ export class Vehicle {
   }
   get yaw() { this.basis(); return Math.atan2(this.fwd.x, this.fwd.z); }
   basis() { this.left.set(1, 0, 0).applyQuaternion(this.q); this.up.set(0, 1, 0).applyQuaternion(this.q); this.fwd.set(0, 0, 1).applyQuaternion(this.q); }
-  engineTorque(rpm) { const t = CFG.torque; if (rpm >= t[t.length - 1][0]) return t[t.length - 1][1]; for (let i = 1; i < t.length; i++) if (rpm < t[i][0]) { const a = t[i - 1], b = t[i]; return a[1] + (b[1] - a[1]) * (rpm - a[0]) / (b[0] - a[0]); } return 0; }
-  ratio() { return this.gear < 0 ? -CFG.rev : CFG.gears[this.gear - 1]; }
+  engineTorque(rpm) { const t = this.c.torque; rpm /= (this.c.torqueRpm || 1); if (rpm >= t[t.length - 1][0]) return t[t.length - 1][1]; for (let i = 1; i < t.length; i++) if (rpm < t[i][0]) { const a = t[i - 1], b = t[i]; return a[1] + (b[1] - a[1]) * (rpm - a[0]) / (b[0] - a[0]); } return 0; }
+  ratio() { return this.gear < 0 ? -this.c.rev : this.c.gears[this.gear - 1]; }
   // world-space force at world point
   applyF(f, pt) { this.F.add(f); this._e.subVectors(pt, this.p); this.T.add(this._d.crossVectors(this._e, f)); }
   groundNormal(x, z, out) { const e = 0.6, n = this._n; const hx = ground(x + e, z) - ground(x - e, z), hz = ground(x, z + e) - ground(x, z - e); return out.set(-hx, 2 * e, -hz).normalize(); }
 
   step(dt, inp) {
-    const c = CFG, m = c.mass; this.basis(); const { left, up, fwd, v, w, p } = this;
+    const c = this.c, m = c.mass; this.basis(); const { left, up, fwd, v, w, p } = this;
     this.F.set(0, -c.g * m, 0); this.T.set(0, 0, 0);
     const fwdSpeed = v.dot(fwd), speed = v.length();
     // ---- inputs / gear logic ----
@@ -73,17 +91,25 @@ export class Vehicle {
     let Te = 0;
     if (this.shift > 0) this.shift -= dt;
     else if (this.rpm < c.redline) Te = thr * this.engineTorque(this.rpm) * (inp.boost ? c.boostTorque : 1);
+    // traction control: cut torque when the driven wheels spin (slip ratio measured last step)
+    const tcT = this.assist.tc ? clamp(1 - (this.slipD - 0.16) * 2.2, 0.35, 1) : 1; this.tcCut += (tcT - this.tcCut) * Math.min(1, dt * 12);
+    if (Te > 0 && fwdSpeed > -1) Te *= this.tcCut;
+    this.thr = thr; this.brk = brk; this.load = clamp(Te / Math.max(1, this.engineTorque(this.rpm) * (inp.boost ? c.boostTorque : 1)), -1, 1); // telemetry
     if (!thr) Te = -(30 + this.rpm * 0.012) * (this.rpm > c.idle + 200 ? 1 : 0); // engine braking
     const driveTotal = Te * gr * c.eff;
     // auto gearbox
     // auto gearbox: decisions use road-speed rpm so wheelspin / locked handbrake don't cause hunting
     const rpmAt = g => Math.abs(fwdSpeed) / c.wheelR * c.gears[g - 1] * c.final * 9.549;
+    // wheelspin fix: if the engine sits above the shift point for >0.6 s (spinning on grass/sand) shift up anyway,
+    // then hold the gear for a moment; downshifts also need the *engine* rpm to be low, so spin never causes hunting.
+    if (this.holdT > 0) this.holdT -= dt;
+    this.spinT = this.rpm > c.up && thr ? this.spinT + dt : 0;
     if (this.grounded >= 2 && this.shift <= 0 && this.gear > 0) {
-      if (this.rpm > c.up && rpmAt(this.gear) > c.up * 0.92 && this.gear < c.gears.length && thr) { this.gear++; this.shift = c.shiftT; }
-      else if (this.gear > 1 && rpmAt(this.gear) < c.down && rpmAt(this.gear - 1) < c.up - 400) { this.gear--; this.shift = c.shiftT * 0.6; }
+      if (this.rpm > c.up && this.gear < c.gears.length && thr && (rpmAt(this.gear) > c.up * 0.92 || (this.spinT > 0.6 && fwdSpeed > 2))) { this.gear++; this.shift = c.shiftT; this.holdT = 1.0; this.spinT = 0; this.events.push(['shift', 1]); }
+      else if (this.gear > 1 && this.holdT <= 0 && rpmAt(this.gear) < c.down && this.rpm < c.down + 900 && rpmAt(this.gear - 1) < c.up - 400) { this.gear--; this.shift = c.shiftT * 0.6; this.events.push(['shift', -1]); }
     }
     // ---- wheels ----
-    let ng = 0; const hold = !thr && !brk && speed < 0.7;
+    let ng = 0, slipMax = 0; const hold = !thr && !brk && speed < 0.7;
     for (let i = 0; i < 4; i++) {
       const wh = this.wheels[i];
       const hpw = this._a.copy(wh.hp).applyQuaternion(this.q).add(p); // hardpoint world
@@ -123,7 +149,7 @@ export class Vehicle {
       const app = this._d.copy(wh.cp).lerp(p, c.forceLift); // force application point
       const r = this._e.subVectors(wh.cp, p), vc = this._a.crossVectors(w, r).add(v);
       const vLong = vc.dot(hd), vLat = vc.dot(lt);
-      const mu = sp.mu, B = c.lonB * sp.bs, R = c.wheelR, den = Math.max(Math.abs(vLong), 3);
+      const mu = sp.mu * this.gripMul, B = c.lonB * sp.bs, R = c.wheelR, den = Math.max(Math.abs(vLong), 3);
       // drive + brake torques
       let Td = (wh.front ? c.split : 1 - c.split) * 0.5 * driveTotal;
       let Tb = brk * (wh.front ? c.brakeF : c.brakeR) + (hold ? 1500 : 0);
@@ -144,12 +170,12 @@ export class Vehicle {
       const lim = mu * Fz, mag = Math.hypot(Fx, Fy); if (mag > lim) { Fx *= lim / mag; Fy *= lim / mag; }
       // rolling resistance
       Fx -= Math.tanh(vLong * 2) * sp.roll * Fz;
-      wh.sl = kap2; wh.sa = alpha; wh.Fx = Fx; wh.Fy = Fy;
+      wh.sl = kap2; wh.sa = alpha; if (Td > 0 && kap2 > slipMax) slipMax = kap2; wh.Fx = Fx; wh.Fy = Fy;
       const f = this._a.copy(hd).multiplyScalar(Fx).addScaledVector(lt, Fy);
       this.applyF(f, app);
       this.applyF(f.copy(up).multiplyScalar(Fs), wh.cp);
     }
-    this.grounded = ng;
+    this.grounded = ng; this.slipD = ng ? slipMax : 0;
     // ---- body contacts (penalty) so roofs/bumpers don't sink into the ground ----
     const gy = ground(p.x, p.z);
     if (p.y - gy < 4) for (const lp of BODY) {
@@ -165,15 +191,19 @@ export class Vehicle {
     }
     // ---- aero, water, boost ----
     this.F.addScaledVector(v, -0.5 * 1.2 * c.cdA * speed);
+    // terminal-speed caps: extra drag above vmax (no 300+ km/h cliff dives) and a vertical 'parachute' drag when falling fast
+    if (speed > c.vmax) this.F.addScaledVector(v, -m * 0.006 * (speed - c.vmax));
+    if (v.y < -22) this.F.y += m * 0.03 * (v.y + 22) * (v.y + 22);
     const depth = WATER + 0.5 - p.y;
     if (depth > 0) { const d = Math.min(depth, 1.6); this.F.addScaledVector(v, -(500 + 90 * speed) * d); this.F.y += m * c.g * 0.35 * d / 1.6; this.T.addScaledVector(w, -2500 * d); }
     if (inp.boost && this.boost > 0) { this.F.addScaledVector(fwd, c.boostPush); this.boost = Math.max(0, this.boost - dt * 0.3); }
     else this.boost = Math.min(1, this.boost + dt * (this.air > 0.4 ? 0.3 : 0.06));
     // ---- stability assist (arcade, FUEL-like): righting torque towards world-up, stronger on the ground ----
-    { const k = ng > 0 ? c.assistGround : c.assistAir, ax = this._a.crossVectors(up, this._b.set(0, 1, 0));
+    { const k = (ng > 0 ? c.assistGround : c.assistAir) * (this.assist.stab ? 1.6 : 1), ax = this._a.crossVectors(up, this._b.set(0, 1, 0));
       // keep pitch freedom in the air (player controls it), assist mostly roll
       if (ng === 0) ax.addScaledVector(left, -ax.dot(left) * 0.85);
-      this.T.addScaledVector(ax, k * m); }
+      this.T.addScaledVector(ax, k * m);
+      if (this.assist.stab && ng > 0 && !inp.hand) this.T.addScaledVector(up, -w.dot(up) * m * 0.5); } // yaw damping: fewer surprise spins
     // ---- air control (pitch/roll/yaw) ----
     if (ng === 0) {
       this.air += dt; this.airMax = Math.max(this.airMax, this.air);
@@ -181,11 +211,13 @@ export class Vehicle {
       this.T.addScaledVector(left, pitch * c.airPitch).addScaledVector(fwd, -roll * c.airRoll * (inp.hand ? 1 : 0.6)).addScaledVector(up, roll * c.airYaw * (inp.hand ? 0 : 1));
       this.T.addScaledVector(w, -400);
     } else {
-      if (this.air > 0.35) { const imp = Math.max(0, -this.vy0); this.landing = imp; this.events.push(['land', imp, this.air]); }
+      if (this.air > 0.35) { const imp = Math.max(0, -this.vy0); this.landing = imp; this.events.push(['land', imp, this.air]);
+        if (imp > 9) { const k = clamp(1 - (imp - 9) * 0.04, 0.45, 1); if (v.y < 0) v.y *= k; w.multiplyScalar(k); } } // soft cliff landings
       this.air = 0;
     }
     this.vy0 = v.y;
     // ---- integrate (semi-implicit Euler) ----
+    { const a = this.F.length() / m, amax = 60 * c.g; if (a > amax) this.F.multiplyScalar(amax / a); } // clamp impulsive spikes (wedged wheels on cliff walls) to 60 g
     v.addScaledVector(this.F, dt / m);
     const tb = this._a.set(this.T.dot(left) / this.Ib[0], this.T.dot(up) / this.Ib[1], this.T.dot(fwd) / this.Ib[2]);
     w.addScaledVector(left, tb.x * dt).addScaledVector(up, tb.y * dt).addScaledVector(fwd, tb.z * dt);
@@ -207,7 +239,7 @@ export class Vehicle {
     this.p.y = ground(this.p.x, this.p.z) + 1.6; this.v.set(0, 0, 0); this.w.set(0, 0, 0);
     this.q.setFromAxisAngle(this._a.set(0, 1, 0), yaw); this.flipT = 0; this.events.push(['recover']);
   }
-  collideCircles(col) { // trees/rocks: x,z,r triples
+  collideCircles(col) { // rocks: x,z,r triples
     const p = this.p, v = this.v;
     for (let i = 0; i < col.length; i += 3) {
       const dx = p.x - col[i], dz = p.z - col[i + 1], r = col[i + 2] + 1.4, d2 = dx * dx + dz * dz;

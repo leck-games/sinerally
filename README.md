@@ -1,10 +1,34 @@
-# SineRally – math-world offroad (merged release: engine + comic graphics)
+# SineRally – math-world offroad free-roam (FUEL-style)
 Run: `python3 -m http.server 8000 --bind 0.0.0.0` in this folder, open http://localhost:8000 (or http://<PC-LAN-IP>:8000 on a phone on the same Wi-Fi). Live: https://leck-games.github.io/sinerally/
-Controls: WASD/arrows drive, Space handbrake/drift, Shift boost, Q/E pitch in the air, R reset, G cycle GFX, F fps/debug.
-Touch: left joystick steer (+ up/down = air pitch), GAS/BRAKE/BOOST/DRIFT buttons, optional Tilt toggle (landscape).
-URL options: `?q=low|med|high` force GFX level, `?dbg` debug overlay, `?auto=1|drift|boost` self-driving test mode.
 
-## Merged build (this version)
+**Keys:** WASD/arrows drive · Space handbrake/drift · Shift boost · Q/E pitch in the air · R reset · M or Tab world map · V next vehicle · G cycle GFX · F fps/debug · Esc close map/menu.
+**Touch:** left joystick steer (+ up/down = air pitch), GAS/BRAKE/BOOST/DRIFT, ☰ menu (vehicle, assists, time, weather, graphics), tap the minimap for the world map, optional Tilt.
+**URL options:** `?q=low|med|high` force GFX · `?dyn=0` disable dynamic resolution · `?tod=0..1` fix time of day (0.5 = noon) · `?wx=clear|rain|fog|dust` · `?auto=1|drift|boost` self-driving test · `?dbg` · `?nopost` (debug).
+
+## Free-roam release (this version)
+- **Comic style everywhere, including Low on phones:** every level now runs the ink post pass (depth + normal edges, posterize,
+  halftone/grain) with harder 3-step cel bands, blue-violet shadow tint, stronger hatching, a silhouette ink rim on objects and
+  a punchier palette. Edges fade with distance so the horizon stays clean. See `shots/next_1_style_before_after.png`.
+- **GFX levels:** Low (pixel ratio 1, 7k grass), Med (1.5, 11k, **phone default**), High (2, desktop default). Dynamic
+  resolution scales the render 0.5–1× to hold 30 fps on touch devices (50 on desktop) and steps the level down if needed
+  unless you picked one yourself (saved in `sinerally_q3`).
+- **Breakable scenery:** trees, bushes, small props and cacti vanish instantly when hit (ink puff, small slowdown: trees 8 %,
+  cacti 5 %, shrubs 2 %). Broken ones are stored as hash ids in a `Set` and stay gone. Big rocks stay solid.
+- **Handling:** speed-sensitive, smoothed touch steering; stability assist (default on for touch) and traction control
+  (menu); fixed the 1st-gear hold under wheelspin; terminal-speed drag and fall drag; softer landings; per-step force clamp
+  so a wheel wedged on a cliff can't fling the car.
+- **3 vehicles:** buggy, truck (heavy, grippy), quad (light, fast) – menu or V, saved.
+- **Day/night** (12 min cycle, or fixed Day/Sunset/Night) with moonlight and headlights; **weather** (clear, rain, fog,
+  dust) that changes grip and view distance.
+- **Fuel cans** scattered across the world refill boost; collected cans are saved in localStorage.
+- **Vistas:** a landmark beacon on the highest spot of each 1.2 km cell. Discover them by driving close; they show on the
+  minimap and world map, and discovered vistas can be teleported to from the world map.
+- **World map** (M/Tab or tap the minimap): hillshade map with roads and vistas, zoom, tap to set a waypoint (HUD arrow +
+  distance); physics pause while it is open.
+- **Audio:** not included – built separately. The vehicle exposes read-only telemetry at `window.SR.telemetry` (see `MERGE_NOTES.md`).
+- Screenshots: `shots/next_*.png`.
+
+## Merged build (previous version)
 One build = the engine pass (from leck-games/sinerally-engine) rendered entirely with the comic/Borderlands shading:
 - **Physics** (`js/vehicle.js`): 120 Hz rigid-body 4x4 – raycast spring/damper suspension per wheel, slip-ratio/slip-angle
   tyre model with per-surface grip (asphalt, dirt, grass, sand, rock, snow, mud), 6-speed auto gearbox with torque curve,
