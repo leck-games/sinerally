@@ -1,6 +1,5 @@
 <!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='7' fill='%23ff6a1a' stroke='black' stroke-width='2'/></svg>">
 <title>SineRally</title>
 <style>
@@ -46,13 +45,18 @@ body>canvas:first-child{background:#000} /* WebGL alpha carries the ink-edge cod
 #menu h3{margin:0 0 6px;font:900 18px "Arial Black",system-ui}
 .mrow{display:flex;gap:6px;align-items:center;margin:6px 0;flex-wrap:wrap}.mrow span{width:150px;font:900 12px "Arial Black",system-ui}
 .sb.sel{background:#ff6a1a;color:#fff}
-</style></head><body>
+</style><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="SineRally">
+<meta name="theme-color" content="#ff6a1a"><meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<style>/* iOS home-screen */canvas{touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}#allBuilds{display:inline-block;text-decoration:none;font:900 12px "Arial Black",system-ui,sans-serif;color:#111;background:#fff;border:3px solid #111;border-radius:6px;padding:5px 9px;box-shadow:3px 3px 0 #111;-webkit-tap-highlight-color:transparent}</style>
+</head><body>
 <div id="hud"><div><div id="spdbox" class="ink"><span id="spd">0</span><span id="unit">KM/H</span></div><div id="boost"><div id="bar"></div></div><div id="air" class="ink"></div></div>
 <div id="race" class="ink"></div><div style="width:140px"></div></div>
 <canvas id="mini" width="130" height="130" title="World map (M)"></canvas><div id="cans">⛽ 0</div>
 <div id="wp"><div id="wpA">▲</div><div id="wpD"></div></div>
 <div id="map"><canvas id="mapc"></canvas><div id="mapui"><button class="sb" id="mClose">✕ BACK</button><button class="sb" id="mZin">＋</button><button class="sb" id="mZout">－</button><button class="sb" id="mClr">CLEAR WAYPOINT</button><span id="mInfo"></span></div><div id="mList"></div></div>
-<div id="menu"><h3>SINERALLY</h3><div id="mRows"></div><div id="mSnd"></div><div class="mrow"><button class="sb" id="mnClose">✕ CLOSE</button></div></div>
+<div id="menu"><h3>SINERALLY<a style="float:right;margin-left:12px" id="allBuilds" href="https://leck-games.github.io/">‹ ALL BUILDS</a></h3><div id="mRows"></div><div id="mSnd"></div><div class="mrow"><button class="sb" id="mnClose">✕ CLOSE</button></div></div>
 <div id="topbtns"><button class="sb" id="tMenu">☰</button><button class="sb" id="tReset">⟲ RESET</button><button class="sb" id="tQ">GFX</button><button class="sb" id="tTilt">Tilt: off</button><button class="sb" id="tDbg">FPS</button><button class="sb" id="tSnd" data-snd-own title="Engine sound mute">🔊</button></div>
 <div id="dbg"></div>
 <div id="joy"><div id="knob"></div></div>
