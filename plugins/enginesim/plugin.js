@@ -3,7 +3,10 @@
 // It is the single source of truth: the standalone demo (main.js) hosts it, and the game vendors
 // a copy of these five files (see MERGE_NOTES.md). Imports nothing from any host.
 import { EngineSim } from './engine-sim.js';
-import { PRESETS, PRESET_ORDER, preset } from './engine-config.js';
+import {
+  PRESETS, PRESET_ORDER, preset, SHAPES, LAYOUTS, BANK_ANGLES, LIMITERS, INDUCTION, MAX_CYL,
+  countsFor, crankOptions, defaultFiringOrder, parseFiringOrder, firingIntervals, cycleOf
+} from './engine-config.js';
 
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
 const num = (v, d) => (typeof v === 'number' && isFinite(v) ? v : d);
@@ -11,11 +14,20 @@ const num = (v, d) => (typeof v === 'number' && isFinite(v) ? v : d);
 export const id = 'enginesim';
 export const name = 'Engine Sim (cylinder pulse synth)';
 export const apiVersion = 1;
-export const version = '1.0.0';
+export const version = '1.1.0';
 export const presets = PRESET_ORDER.map((k) => ({ id: k, name: PRESETS[k].name }));
 export const defaultPreset = 'muscleV8';
 /** Suggested preset per host vehicle id (hosts may ignore). */
-export const vehiclePresets = { buggy: 'boxer4', truck: 'muscleV8', quad: 'dirtbike' };
+export const vehiclePresets = { buggy: 'boxer4', truck: 'muscleV8', quad: 'dirtbike', hyper: 'v12', forester: 'inline6' };
+
+/**
+ * Optional (API v1 extension): describes the config that setConfig()/getConfig() speak, so a host can build an
+ * editor without importing anything from the plugin. Pure data + pure functions over a config object.
+ */
+export const configSchema = {
+  maxCylinders: MAX_CYL, shapes: SHAPES, layouts: LAYOUTS, bankAngles: BANK_ANGLES, limiters: LIMITERS, induction: INDUCTION,
+  countsFor, crankOptions, defaultFiringOrder, parseFiringOrder, firingIntervals, cycleOf
+};
 
 /**
  * @param {BaseAudioContext} ctx  host-owned, already unlocked (running) context
@@ -34,6 +46,15 @@ export async function create(ctx, destination, options = {}) {
     engine: sim,          // plugin-specific extra (the standalone tuner uses it); not part of API v1
     get preset() { return presetId; },
     setPreset(key) { if (!PRESETS[key]) return false; sim.loadPreset(key); presetId = key; return true; },
+    /** Optional: patch (or {replace:true} swap) the engine config live. Returns the derived config (a copy). */
+    setConfig(patch, opts = {}) {
+      if (!patch || typeof patch !== 'object') return sim.getConfig();
+      sim.setConfig(patch, { replace: !!opts.replace }); presetId = opts.preset || null; return sim.getConfig();
+    },
+    /** Optional: the current derived config (a JSON-safe copy). */
+    getConfig() { return sim.getConfig(); },
+    /** Optional: firing-light state for the current animation frame {now, crank, cycle, rpm, lastFire[], lastKind[]}. */
+    getVisualState() { return sim.getVisualState(); },
     update(t, dt) {
       const c = sim.config;
       let rpm = num(t.rpm, c.idleRpm);
@@ -64,4 +85,4 @@ export async function create(ctx, destination, options = {}) {
   };
 }
 
-export default { id, name, apiVersion, version, presets, defaultPreset, vehiclePresets, create };
+export default { id, name, apiVersion, version, presets, defaultPreset, vehiclePresets, configSchema, create };

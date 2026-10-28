@@ -36,6 +36,8 @@ export function createEngineAudio({ sr, log = console } = {}) {
   // ---------- AudioContext (host-owned) ----------
   function unlock() { // call synchronously inside a user gesture
     try {
+      // iOS: route Web Audio as media playback (plays with the silent switch on). Must be set inside the gesture, BEFORE the context exists.
+      try { if (navigator.audioSession && navigator.audioSession.type !== 'playback') navigator.audioSession.type = 'playback'; } catch (e) { }
       if (!ctx) {
         const AC = window.AudioContext || window.webkitAudioContext; if (!AC) { status = 'No WebAudio in this browser.'; return; }
         try { ctx = new AC({ latencyHint: 'interactive' }); } catch (e) { ctx = new AC(); }
@@ -44,7 +46,6 @@ export function createEngineAudio({ sr, log = console } = {}) {
         master = ctx.createGain(); master.gain.value = 0; master.connect(limiter); limiter.connect(ctx.destination);
         applyGain(true);
       }
-      try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { }
       if (ctx.state !== 'running') ctx.resume().catch(() => { });
       const b = ctx.createBuffer(1, 1, 22050), s = ctx.createBufferSource(); s.buffer = b; s.connect(ctx.destination); s.start(0);
       if (!active && !loading && st.plugin !== 'off') activate(st.plugin);
@@ -114,7 +115,7 @@ export function createEngineAudio({ sr, log = console } = {}) {
       st.plugin = id; save(); error = isFallback ? error : '';
       status = (d.name || d.id) + (d.version ? ' v' + d.version : '');
       log.info('[audio] plugin active:', d.id, d.version || '');
-      return true;
+      notify('active'); return true;
     } catch (e) {
       if (my !== token) return false;
       const msg = (e && e.message) || String(e);
@@ -141,7 +142,7 @@ export function createEngineAudio({ sr, log = console } = {}) {
   }
   function setPreset(pid) {
     if (!desc) return; (st.presets[desc.id] || (st.presets[desc.id] = {}))[T.vehicle] = pid; save();
-    if (inst.setPreset) { try { inst.setPreset(pid); } catch (e) { fail('setPreset', e); } render(); } else activate(active);
+    if (inst.setPreset) { try { inst.setPreset(pid); } catch (e) { fail('setPreset', e); } notify('preset'); render(); } else activate(active);
   }
 
   // ---------- per-frame telemetry ----------
@@ -161,10 +162,15 @@ export function createEngineAudio({ sr, log = console } = {}) {
     t.grounded = s.grounded; t.airborne = s.grounded === 0; t.airTime = s.air; t.surface = s.surface; t.vehicle = s.vehicle; t.paused = paused;
     t.vehiclePreset = s.soundPreset || undefined; // the vehicle's 'default sound preset id' (vehicle module), optional
     const temp = s['engine:temp'] !== undefined ? s['engine:temp'] : s.engineTemp; t.engineTemp = typeof temp === 'number' ? temp : undefined; // °C, optional (physics module)
+    if (test.on) { // sound-editor test bench: synthetic rev / nitro while the editor is open (car input is paused)
+      const tgt = test.rev ? t.idleRpm + (t.redlineRpm - t.idleRpm) * 0.93 : t.idleRpm; test.rpm += (tgt - test.rpm) * Math.min(1, dt * (test.rev ? 2.4 : 1.8));
+      t.rpm = test.rpm; t.rpmNorm = clamp((t.rpm - t.idleRpm) / Math.max(1, t.redlineRpm - t.idleRpm), 0, 1.2);
+      t.throttle = test.rev ? 1 : 0; t.load = test.rev ? 0.5 : -0.2; t.nitro = !!test.nitro; t.nitroStrength = t.nitro ? 1 : 0; t.limiter = false; t.ignition = 1; t.shifting = false;
+    }
     let sl = 0; const w = s.wheels; for (let i = 0; i < 4; i++) { const o = w[i]; if (o.contact) sl = Math.max(sl, Math.abs(o.slipRatio), Math.abs(o.slipAngle) * 2.5); } t.slip = clamp(sl, 0, 1);
     // derived events
     if (t.vehicle !== prev.vehicle) {
-      if (prev.vehicle !== null) { event('vehicle', { id: t.vehicle }); if (desc) { const p = presetFor(desc, t.vehicle); if (p && inst.setPreset) try { inst.setPreset(p); } catch (e) { fail('setPreset', e); } render(); } }
+      if (prev.vehicle !== null) { event('vehicle', { id: t.vehicle }); if (desc) { const p = presetFor(desc, t.vehicle); if (p && inst.setPreset) try { inst.setPreset(p); } catch (e) { fail('setPreset', e); } notify('vehicle'); render(); } }
       prev.vehicle = t.vehicle;
     }
     prev.upT = Math.max(0, prev.upT - dt); prev.bfT = Math.max(0, prev.bfT - dt);
@@ -219,6 +225,7 @@ export function createEngineAudio({ sr, log = console } = {}) {
       (error ? `<div style="color:#c0201a">⚠ ${esc(error)}</div>` : '') +
       `<div style="opacity:.7">Custom scripts run with full page privileges – only load code you trust. Maker docs: PLUGIN_API.md</div>`;
     el.appendChild(info);
+    for (const f of extras) { try { f(el, row, btn); } catch (e) { log.warn('[audio] menu extra', e); } }
   }
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   function loadUrl(url) {
@@ -232,11 +239,16 @@ export function createEngineAudio({ sr, log = console } = {}) {
     try { localStorage.setItem(LS_FILE, src); } catch (e) { error = 'Could not store the file: ' + e.message; render(); return false; }
     st.fileName = file.name; save(); return activate('custom-file');
   }
+  const listeners = new Set(), extras = [], test = { on: false, rev: false, nitro: false, rpm: 0 };
+  function notify(kind) { for (const f of listeners) { try { f(kind, inst, desc); } catch (e) { log.warn('[audio] listener', e); } } }
   function setMuted(m) { st.muted = !!m; save(); applyGain(); render(); }
   return {
     get running() { return !!ctx && ctx.state === 'running'; },
     unlock, frame, activate, loadUrl, loadFile, setMuted, setPreset, stats, telemetry: T,
-    buildMenu(el) { menuEl = el; render(); },
+    buildMenu(el) { menuEl = el; render(); }, rerender: () => render(),
+    onChange(f) { listeners.add(f); return () => listeners.delete(f); }, // f(kind: 'active'|'preset'|'vehicle', instance, descriptor)
+    addMenuExtra(f) { extras.push(f); }, // f(el, row(label), btn(row, text, sel, fn)) appended to the ENGINE SOUND section
+    setTest(o) { if (o.on && !test.on) test.rpm = (sr && sr.telemetry.rpm) || T.idleRpm; Object.assign(test, o); }, get test() { return test; },
     get muted() { return st.muted; }, get active() { return active; }, get plugin() { return desc; }, get instance() { return inst; },
     get ctx() { return ctx; }, get error() { return error; }, get status() { return status; },
   };

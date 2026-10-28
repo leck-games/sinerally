@@ -1,9 +1,33 @@
 # SineRally – math-world offroad free-roam (FUEL-style)
 Run: `python3 -m http.server 8000 --bind 0.0.0.0` in this folder, open http://localhost:8000 (or http://<PC-LAN-IP>:8000 on a phone on the same Wi-Fi). Live: https://leck-games.github.io/sinerally/
 
-**Keys:** WASD/arrows drive · Space handbrake/drift · Shift boost · Q/E pitch in the air · R reset · M or Tab world map · V next vehicle · G cycle GFX · F fps/debug · Esc close map/menu.
-**Touch:** left joystick steer (+ up/down = air pitch), GAS/BRAKE/BOOST/DRIFT, ☰ menu (vehicle, assists, time, weather, graphics, engine sound), tap the minimap for the world map, optional Tilt.
-**URL options:** `?q=low|med|high` force GFX · `?dyn=0` disable dynamic resolution · `?tod=0..1` fix time of day (0.5 = noon) · `?wx=clear|rain|fog|dust` · `?auto=1|drift|boost` self-driving test · `?dbg` · `?nopost` (debug).
+**Keys:** WASD/arrows drive · Space handbrake/drift · Shift boost · Q/E pitch in the air · R reset · M or Tab world map · V next vehicle · U unload logs · G cycle GFX · F fps/debug · Esc close map/menu/editor.
+**Touch:** left joystick steer (+ up/down = air pitch), GAS/BRAKE/BOOST/DRIFT, ☰ menu (car selector, attachments, assists, time, weather, graphics, garage, engine sound + EDIT), tap the minimap for the world map, optional Tilt.
+**URL options:** `?q=low|med|high` force GFX · `?dyn=0` disable dynamic resolution · `?tod=0..1` fix time of day (0.5 = noon) · `?wx=clear|rain|storm|fog|dust` · `?auto=1|drift|boost` self-driving test · `?dbg` · `?nopost` (debug).
+
+## Physics + Terrain merge (2026-10-28)
+The two standalone modules are now part of the game, vendored unchanged with their contracts:
+- **`js/phys/`** ← sinerally-physics (`tools/sync-physics.sh`, `js/phys/VERSION`, contract `js/phys/MODULE_API.md`):
+  120 Hz rig (`createRig` / `rig.step`), 5 cars – BUGGY, TRUCK, QUAD, SINE GT (hyper), TIMBERWOLF (forester) – and
+  attachments (bull bar, roof lights, log rack, harvester head). ☰ → car selector with 3D preview and attachment picker;
+  choice saved (`srp_vehicle`, `srp_attach_<id>`). Engine temperature gauge with HOT / OVERHEAT / ENGINE CUT, damage,
+  ☰ → GARAGE (repair, unload, regrow trees, put out fires). Harvester: crawl into a tree (<12 km/h) to fell it, 12 logs per rack, U unloads.
+- **`js/terrain/`** ← sinerally-terrain (`tools/sync-terrain.sh`, `js/terrain/VERSION`, contract `js/terrain/MODULE_API.md`):
+  biomes (forest, grassland, savanna, desert, alpine…), ground rings + GPU grass (keeps the 7996819 engine-build grass look),
+  trees with **3 HP** (damage from impact speed/angle: ≤30 km/h none, 200 km/h head-on −2, ≥300 km/h through), HP labels on
+  damaged/nearby trees, **grass fire** (an overheating engine ignites dry grass; rain/storm puts it out; forest, road and water
+  don't burn), **forest weather** (spatial rain heavier in forests, storms) and the day/night sky. One weather system – the
+  game's menu/`?wx=`/`?tod=` map onto `T.setRain` / `T.setTimeOfDay`; fog/dust are an overlay on top (no second rain).
+- **One event bus** (`js/phys/host/bus.js`): physics, terrain and game publish on it; everything is forwarded to `SR.on`
+  so sound plugins can hear `tree:damage`, `tree:destroyed`, `engine:hot`, `engine:overheat`, `harvester:*`, `crash`, `land`… .
+- Kept: sound plugin host, world map, vistas/landmarks, fuel cans, day/night, comic post pass on all GFX levels, iOS
+  home-screen metas, launcher link. Removed (replaced by the modules): `js/vehicle.js`, `js/grass.js`, `js/roads.js`.
+- **Engine sound editor:** ☰ → ENGINE SOUND → **EDIT** opens a compact panel (collapsed sections) with the Engine Sim
+  controls – layout (inline/V/boxer/**rotary 1–16 rotors**), firing order + firing-lights strip, per-cylinder tweaks,
+  intake/exhaust/mix. Auto-saved per vehicle; named save/load; JSON export/import; RESET returns to the preset. Car
+  input is paused while it is open. Only shown if the active plugin has `setConfig/getConfig` (PLUGIN_API.md §1a).
+- Tests (serve on :18931): `node tools/test-merge.cjs` (merge e2e + `shots/merge_*.png`), `node tools/test-terrain.cjs`
+  (terrain e2e adapted to the game), `node tools/test-sound.cjs`; physics unit tests live in sinerally-physics (`node tests/unit.mjs`).
 
 ## Engine sound (plugin API v1)
 - **Engine sound is back, as a plugin.** The game hosts *Engine Sound Plugins*: plain ES modules with
@@ -25,12 +49,12 @@ Run: `python3 -m http.server 8000 --bind 0.0.0.0` in this folder, open http://lo
 - **GFX levels:** Low (pixel ratio 1, 7k grass), Med (1.5, 11k, **phone default**), High (2, desktop default). Dynamic
   resolution scales the render 0.5–1× to hold 30 fps on touch devices (50 on desktop) and steps the level down if needed
   unless you picked one yourself (saved in `sinerally_q3`).
-- **Breakable scenery:** trees, bushes, small props and cacti vanish instantly when hit (ink puff, small slowdown: trees 8 %,
+- **Breakable scenery** *(superseded: trees now have HP, see the 2026-10-28 merge)*: trees, bushes, small props and cacti vanish instantly when hit (ink puff, small slowdown: trees 8 %,
   cacti 5 %, shrubs 2 %). Broken ones are stored as hash ids in a `Set` and stay gone. Big rocks stay solid.
 - **Handling:** speed-sensitive, smoothed touch steering; stability assist (default on for touch) and traction control
   (menu); fixed the 1st-gear hold under wheelspin; terminal-speed drag and fall drag; softer landings; per-step force clamp
   so a wheel wedged on a cliff can't fling the car.
-- **3 vehicles:** buggy, truck (heavy, grippy), quad (light, fast) – menu or V, saved.
+- **3 vehicles:** buggy, truck (heavy, grippy), quad (light, fast) – menu or V, saved. *(now 5, see the 2026-10-28 merge)*
 - **Day/night** (12 min cycle, or fixed Day/Sunset/Night) with moonlight and headlights; **weather** (clear, rain, fog,
   dust) that changes grip and view distance.
 - **Fuel cans** scattered across the world refill boost; collected cans are saved in localStorage.
@@ -41,7 +65,7 @@ Run: `python3 -m http.server 8000 --bind 0.0.0.0` in this folder, open http://lo
 - **Audio:** see *Engine sound* above. The vehicle exposes read-only telemetry at `window.SR.telemetry` (see `MERGE_NOTES.md`).
 - Screenshots: `shots/next_*.png`.
 
-## Merged build (previous version)
+## Merged build (previous version – `js/vehicle.js`, `js/grass.js`, `js/roads.js` were replaced by the modules on 2026-10-28)
 One build = the engine pass (from leck-games/sinerally-engine) rendered entirely with the comic/Borderlands shading:
 - **Physics** (`js/vehicle.js`): 120 Hz rigid-body 4x4 – raycast spring/damper suspension per wheel, slip-ratio/slip-angle
   tyre model with per-surface grip (asphalt, dirt, grass, sand, rock, snow, mud), 6-speed auto gearbox with torque curve,

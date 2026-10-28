@@ -1,13 +1,9 @@
 // Comic / "Borderlands-ish" shading: banded cel light, hard terminator, screen-space hatching,
 // atmospheric tint. Every material writes a normal code into alpha for the ink edge pass.
 import * as THREE from 'three';
-export const U = {
-  uSun: { value: new THREE.Vector3(0.45, 0.75, 0.35).normalize() },
-  uHorizon: { value: new THREE.Color(0xd9f1ff) }, uZenith: { value: new THREE.Color(0x1f74e0) },
-  uPx: { value: 1 }, uHatch: { value: 1 }, uFar: { value: 560 }, uTime: { value: 0 },
-  uLight: { value: new THREE.Color(1, 1, 1) }, uAmb: { value: 1 }, uRim: { value: 1 }, uHeadK: { value: 0 },
-  uHeadP: { value: new THREE.Vector3() }, uHeadD: { value: new THREE.Vector3(0, 0, 1) }, uNight: { value: 0 }, uRain: { value: 0 },
-};
+// Shared uniforms: owned by the vendored terrain module (its weather writes sky / fog / light / rain). Same keys as before.
+import { U } from './terrain/comic.js';
+export { U };
 export const COMIC = /* glsl */`
 uniform vec3 uSun; uniform vec3 uHorizon; uniform float uPx; uniform float uHatch; uniform float uFar; uniform float uTime;
 uniform vec3 uLight; uniform float uAmb, uRim, uHeadK; uniform vec3 uHeadP, uHeadD;
@@ -121,11 +117,11 @@ export function waterMat({ far = false, uNear = null } = {}) { // far: engine fa
       }` });
 }
 // ---------------- objects (vertex coloured, optional instancing, wind, unlit, hull) ----------------
-export function objMat({ wind = 0, unlit = false, hull = 0, gate = false, hatch = 1 } = {}) {
-  const defs = {}; if (unlit) defs.UNLIT = 1; if (hull) defs.HULL = 1; if (gate) defs.GATE = 1;
-  const m = new THREE.ShaderMaterial({ uniforms: { ...U, uWind: { value: wind }, uHull: { value: hull }, uDone: { value: 0 }, uHK: { value: hatch } }, defines: defs, vertexColors: true,
+export function objMat({ wind = 0, unlit = false, hull = 0, gate = false, hatch = 1, tint = null } = {}) { // tint: flat colour instead of the vertex colour (physics attachments)
+  const defs = {}; if (unlit) defs.UNLIT = 1; if (hull) defs.HULL = 1; if (gate) defs.GATE = 1; if (tint) defs.TINT = 1;
+  const m = new THREE.ShaderMaterial({ uniforms: { ...U, uWind: { value: wind }, uHull: { value: hull }, uDone: { value: 0 }, uHK: { value: hatch }, uTint: { value: new THREE.Color(tint || 0xffffff) } }, defines: defs, vertexColors: true,
     side: hull ? THREE.BackSide : THREE.FrontSide,
-    vertexShader: `uniform float uWind, uHull, uTime, uDone; attribute float cp; varying vec3 vW; varying vec3 vN; varying vec3 vC;
+    vertexShader: `uniform float uWind, uHull, uTime, uDone; uniform vec3 uTint; attribute float cp; varying vec3 vW; varying vec3 vN; varying vec3 vC;
       void main(){
         mat4 m = modelMatrix;
         #ifdef USE_INSTANCING
@@ -140,6 +136,9 @@ export function objMat({ wind = 0, unlit = false, hull = 0, gate = false, hatch 
         vW = w.xyz; vN = normalize(mat3(m) * normal); vC = color;
         #ifdef USE_INSTANCING_COLOR
           vC *= instanceColor;
+        #endif
+        #ifdef TINT
+          vC = uTint;
         #endif
         #ifdef GATE
           if (cp > 0.5 && cp < uDone + 0.5) vC = vec3(.25,.85,.35);

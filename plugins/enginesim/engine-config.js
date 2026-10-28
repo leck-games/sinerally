@@ -13,14 +13,17 @@ export const BANK_ANGLES = [15, 45, 54, 60, 72, 75, 90, 110, 120, 135, 180];
 export const LIMITERS = [['hard', 'Hard cut (bounce)'], ['soft', 'Soft (random cut)'], ['pops', 'Pops & bangs']];
 export const INDUCTION = [['none', 'Naturally aspirated'], ['turbo', 'Turbo (whine + BOV)'], ['super', 'Supercharger (whine)']];
 
+/** Max cylinders / rotors for every layout (the DSP and the firing lights track 16). */
+export const MAX_CYL = 16;
+const range = (a, b, s = 1) => { const r = []; for (let i = a; i <= b; i += s) r.push(i); return r; };
 export function countsFor(layout) {
   switch (layout) {
-    case 'inline': return [2, 3, 4, 5, 6];
-    case 'v': return [2, 6, 8, 10, 12];
-    case 'boxer': return [2, 4, 6];
+    case 'inline': return range(2, MAX_CYL);
+    case 'v': return range(2, MAX_CYL, 2);       // two equal banks
+    case 'boxer': return range(2, MAX_CYL, 2);   // opposed pairs
     case 'single': return [1];
-    case 'rotary': return [2, 3];
-    default: return Array.from({ length: 16 }, (_, i) => i + 1);
+    case 'rotary': return range(1, MAX_CYL);     // 1–16 rotors, each fires once per eccentric-shaft rev, phased 360°/n
+    default: return range(1, MAX_CYL);
   }
 }
 
@@ -32,6 +35,8 @@ export function crankOptions(cfg) {
   return [['even', 'Even fire']];
 }
 
+// Rotary: one firing per rotor per eccentric-shaft revolution, so the cycle is 360° of e-shaft and n rotors are
+// phased 360°/n apart (firingIntervals -> even). 2-strokes also fire every 360°.
 export function cycleOf(cfg) { return (cfg.layout === 'rotary' || cfg.stroke === 2) ? 360 : 720; }
 
 export function defaultFiringOrder(cfg) {
@@ -126,7 +131,7 @@ export function deriveEngine(input) {
   const cfg = Object.assign(clone(BASE_CONFIG), clone(input));
   cfg.car = Object.assign(clone(DEFAULT_CAR), cfg.car || {});
   if (cfg.layout === 'single') cfg.cylinders = 1;
-  if (cfg.layout === 'rotary') { cfg.cylinders = cfg.cylinders === 3 ? 3 : 2; }
+  cfg.cylinders = Math.round(+cfg.cylinders) || 1;
   const counts = countsFor(cfg.layout);
   if (!counts.includes(cfg.cylinders)) cfg.cylinders = counts.includes(4) ? 4 : counts[Math.min(counts.length - 1, 2)];
   const n = cfg.cylinders;

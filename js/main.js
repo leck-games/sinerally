@@ -1,23 +1,41 @@
-// SineRally — merged release: ENGINE (rigid-body 4x4 vehicle.js, multi-region world.js, road graph roads.js,
-// GPU grass grass.js, near/far ring-buffer terrain, gauges) + GRAPHICS (comic/Borderlands-style shading from shaders.js:
-// ink outlines, cel bands, hatching, posterize/halftone/grain, code-built buggy, puffs, skids, comic sky & HUD).
+// SineRally — merged release. Game shell (comic renderer, HUD, race gates, map, landmarks, fuel cans, sound plugin host)
+// + vendored modules: js/terrain/ (sinerally-terrain: biomes, trees with HP, grass fire, forest weather/rain, day/night sky)
+// and js/phys/ (sinerally-physics: rigid-body step, 5 vehicles, attachments, engine heat, tree damage).
+// Everything talks through ONE event bus (`bus`): physics heat -> terrain fire, physics tree contacts -> terrain tree store,
+// terrain grip/wet -> physics surfaceAt, and every event is forwarded to window.SR for the sound plugin (PLUGIN_API.md).
 import * as THREE from 'three';
 import * as W from './world.js';
-import { Vehicle, CFG, VEHICLES } from './vehicle.js';
 import { createEngineAudio } from './engine-audio.js'; // engine sound plugin host (PLUGIN_API.md); talks to plugins only via the API
-import { createRoads } from './roads.js';
-import { createGrass } from './grass.js';
-import { U, gridTerrainMat, waterMat, objMat, skyMat, puffMat, decalMat, postMat, roadMat, precipMat } from './shaders.js';
-import { treeVariants, rockVariants, cactusVariants, buggy, truck, quad as quadModel, fuelCan, beacon, trackProps } from './models.js';
-const { WATER, nearTrack, trackPoint, hash2, sample, surfaceOf, colourOf, grassDensity, normal, height, ground, SURF } = W;
+import { createSoundEditor } from './sound-editor.js';
+import { U, objMat, puffMat, decalMat, postMat, precipMat } from './shaders.js';
+import { rockVariants, fuelCan, beacon, trackProps } from './models.js';
+import { createTerrain } from './terrain/index.js';
+import * as PH from './phys/physics/index.js';
+import { createRig } from './phys/host/rig.js';
+import { createBus } from './phys/host/bus.js';
+import { buildVehicle } from './phys/vehicles/build.js';
+import { listVehicles, getVehicle, DEFAULT_VEHICLE } from './phys/vehicles/index.js';
+import { openSelector } from './phys/vehicles/selector.js';
+import { renderPicker } from './phys/attachments/picker.js';
+const { WATER, nearTrack, trackPoint, hash2, sample, surfaceOf, colourOf, normal, height, ground } = W;
 const $ = id => document.getElementById(id);
 const QS = new URLSearchParams(location.search);
 const isTouch = matchMedia('(pointer:coarse)').matches || 'ontouchstart' in window;
+const store = { get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { } } };
+// ---------- event plumbing: SR listeners (sound plugin, tests) + the shared module bus ----------
+const listeners = {}; function fire(type, data) { (listeners[type] || []).forEach(f => { try { f(data); } catch (e) { console.warn(e); } }); }
+const bus = createBus(); const evLog = []; let lastGear = 1;
+bus.on('*', (d, type) => { // forward everything to SR (game event names: shift = direction, land = {value, extra: airTime})
+  evLog.push(type); if (evLog.length > 400) evLog.splice(0, 100);
+  if (type === 'shift') { const g = d.value, dir = Math.sign(g - lastGear) || 1; lastGear = g; fire('shift', { value: dir, gear: g }); }
+  else if (type === 'land') fire('land', { value: d.value, extra: d.air });
+  else fire(type, d);
+});
 // ---------- renderer + quality (GFX toggle). The comic post pass (ink edges, palette) now runs on EVERY level, Low included;
 // Low only drops resolution, halftone/grain and draw distance. Phones default to Med; dynamic resolution holds 30 fps. ----------
 const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' }); renderer.info.autoReset = false;
 renderer.setSize(innerWidth, innerHeight); document.body.prepend(renderer.domElement);
-const QUAL = { Low: { pr: 1, post: true, fx: 1, sr: 200, hatch: 1.15, grass: 7000 }, Med: { pr: 1.5, post: true, fx: 1, sr: 250, hatch: 1.1, grass: 11000 }, High: { pr: 2, post: true, fx: 1, sr: 300, hatch: 1, grass: 16000 } };
+const QUAL = { Low: { pr: 1, post: true, fx: 1, sr: 200, hatch: 1.15, grass: 7000, trees: 0 }, Med: { pr: 1.5, post: true, fx: 1, sr: 250, hatch: 1.1, grass: 11000, trees: 1 }, High: { pr: 2, post: true, fx: 1, sr: 300, hatch: 1, grass: 16000, trees: 2 } };
 const qArg = (QS.get('q') || '').toLowerCase(), qMap = { low: 'Low', med: 'Med', high: 'High' };
 let qName = qMap[qArg] || localStorage.getItem('sinerally_q3') || (isTouch ? 'Med' : 'High'); if (!QUAL[qName]) qName = isTouch ? 'Med' : 'High';
 let qLocked = !!(qMap[qArg] || localStorage.getItem('sinerally_q3')); // user choice: dyn-res never changes the level then
@@ -30,13 +48,12 @@ const rt = new THREE.WebGLRenderTarget(1, 1, { depthTexture: depthTex, minFilter
 const post = postMat(); post.uniforms.tCol.value = rt.texture; post.uniforms.tDep.value = depthTex; post.uniforms.uN.value = camera.near; post.uniforms.uF.value = camera.far;
 const postScene = new THREE.Scene(), postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), post); quad.frustumCulled = false; postScene.add(quad);
-const hulls = [];
 function applyQuality() {
   const q = QUAL[qName], pr = Math.min(devicePixelRatio, q.pr) * dynS;
   renderer.setPixelRatio(pr); renderer.setSize(innerWidth, innerHeight); U.uPx.value = pr; U.uHatch.value = q.hatch; post.uniforms.uFx.value = q.fx;
   const w = Math.floor(innerWidth * pr), h = Math.floor(innerHeight * pr); rt.setSize(w, h); post.uniforms.uRes.value.set(w, h); post.uniforms.uThick.value = Math.max(1.6, pr * 1.4);
-  hulls.forEach(m => m.visible = !q.post); if (q.sr !== lastSr) { scx = 1e9; lastSr = q.sr; } $('tQ').textContent = 'GFX: ' + qName; window.__pr = pr;
-  if (grass) grass.mesh.geometry.instanceCount = q.grass;
+  if (q.sr !== lastSr) { scx = 1e9; lastSr = q.sr; } $('tQ').textContent = 'GFX: ' + qName; window.__pr = pr;
+  if (grassMesh) grassMesh.geometry.instanceCount = q.grass;
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
 }
 addEventListener('resize', () => applyQuality());
@@ -50,167 +67,112 @@ function dynRes(dt) { // every second: scale render resolution to hold the targe
   if (Math.abs(s - dynS) > 0.03) { dynS = s; applyQuality(); }
   if (dynS <= 0.52 && f < tgt * 0.8) { if (++slowN >= 4 && !qLocked && qName !== 'Low') { qName = qName === 'High' ? 'Med' : 'Low'; dynS = 0.85; slowN = 0; applyQuality(); } } else slowN = 0;
 }
-// ---------- sky ----------
-const sky = new THREE.Mesh(new THREE.SphereGeometry(1000, 24, 12), skyMat()); sky.frustumCulled = false; sky.renderOrder = -1; scene.add(sky);
-
-// ---------- terrain: ring-buffer grids (near 4 m with grass texture, far 16 m); only new rows/cols are sampled ----------
+// ---------- terrain module (vendored js/terrain): ground rings, GPU grass, trees with HP, grass fire, weather + sky ----------
+// It gets an emit-only bus (no on()), so the game routes physics events into it explicitly (fractional tree HP lives here).
+const T = createTerrain({ bus: { emit: (t, d) => bus.emit(t, d) }, small: SMALL, grassCount: QUAL.High.grass, persistKey: 'sinerally_terrain1' });
+const tMeshes = T.setup(scene) || [];
+const grassMesh = tMeshes.find(m => m && m.geometry && m.geometry.attributes && m.geometry.attributes.off) || null;
 const SO = { h: 0, hn: 0, deck: 0, road: 0, rtype: 0, dom: 0, riv: 0, rd: 0 }, nv = [0, 0, 0], cv = [0, 0, 0];
-const SWT = [[0, 0, 0, 1], [0, 0, 0, 1], [0, 0, 0, 0], [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]; // per surface: sand, rock, snow, dirt weights
-class Grid {
-  constructor(N, step, mat, withTex) {
-    const n = this.n = N + 1; this.N = N; this.step = step;
-    this.H = new Float32Array(n * n); this.NRM = new Float32Array(n * n * 3); this.COL = new Float32Array(n * n * 3); this.SW = new Float32Array(n * n * 4);
-    this.gi0 = this.gj0 = null;
-    const g = this.geo = new THREE.BufferGeometry();
-    this.pos = new Float32Array(n * n * 3); this.nor = new Float32Array(n * n * 3); this.col = new Float32Array(n * n * 3); this.sw = new Float32Array(n * n * 4);
-    g.setAttribute('position', new THREE.BufferAttribute(this.pos, 3)); g.setAttribute('normal', new THREE.BufferAttribute(this.nor, 3));
-    g.setAttribute('color', new THREE.BufferAttribute(this.col, 3)); g.setAttribute('sw', new THREE.BufferAttribute(this.sw, 4));
-    const idx = new (n * n > 65535 ? Uint32Array : Uint16Array)(N * N * 6); let q = 0;
-    for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) { // same split as PlaneGeometry (grass shader relies on it)
-      const a = j * n + i, b = (j + 1) * n + i, c = (j + 1) * n + i + 1, d = j * n + i + 1;
-      idx[q++] = a; idx[q++] = b; idx[q++] = d; idx[q++] = b; idx[q++] = c; idx[q++] = d;
-    }
-    g.setIndex(new THREE.BufferAttribute(idx, 1));
-    this.mesh = new THREE.Mesh(g, mat); this.mesh.frustumCulled = false; scene.add(this.mesh);
-    if (withTex) { this.tdata = new Float32Array(n * n * 4); this.tex = new THREE.DataTexture(this.tdata, n, n, THREE.RGBAFormat, THREE.FloatType); this.tex.minFilter = this.tex.magFilter = THREE.NearestFilter; this.tex.needsUpdate = true; }
-  }
-  ri(g) { const n = this.n; return ((g % n) + n) % n; }
-  compute(gi, gj) {
-    const s = this.step, x = gi * s, z = gj * s, k = this.ri(gj) * this.n + this.ri(gi);
-    sample(x, z, SO); normal(x, z, nv); const surf = surfaceOf(x, z, SO, nv[1]); colourOf(x, z, SO, nv[1], surf, cv);
-    const j = 0.94 + 0.12 * hash2(gi, gj, 3); // per-vertex tint jitter
-    this.H[k] = SO.h; this.NRM.set(nv, k * 3); this.COL[k * 3] = cv[0] * j; this.COL[k * 3 + 1] = cv[1] * j; this.COL[k * 3 + 2] = cv[2] * j;
-    this.SW.set(SWT[surf], k * 4);
-    if (this.tdata) {
-      const d = grassDensity(x, z, SO, nv[1], surf), o = k * 4;
-      this.tdata[o] = SO.h; this.tdata[o + 1] = d;
-      this.tdata[o + 2] = Math.min(255, cv[0] * 0.9 * 255 | 0) * 256 + Math.min(255, cv[1] * 1.08 * 255 | 0); this.tdata[o + 3] = Math.min(255, cv[2] * 0.85 * 255 | 0);
-    }
-  }
-  update(px, pz, force) {
-    const N = this.N, n = this.n, s = this.step, gi0 = Math.round(px / s) - N / 2, gj0 = Math.round(pz / s) - N / 2;
-    if (!force && gi0 === this.gi0 && gj0 === this.gj0) return false;
-    const o0 = this.gi0, p0 = this.gj0, fresh = o0 === null || force;
-    for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
-      const gi = gi0 + i, gj = gj0 + j;
-      if (fresh || gi < o0 || gi > o0 + N || gj < p0 || gj > p0 + N) this.compute(gi, gj);
-    }
-    this.gi0 = gi0; this.gj0 = gj0;
-    let v = 0;
-    for (let j = 0; j < n; j++) { const rj = this.ri(gj0 + j) * n; for (let i = 0; i < n; i++, v++) {
-      const k = rj + this.ri(gi0 + i), v3 = v * 3, k3 = k * 3;
-      this.pos[v3] = (gi0 + i) * s; this.pos[v3 + 1] = this.H[k]; this.pos[v3 + 2] = (gj0 + j) * s;
-      this.nor[v3] = this.NRM[k3]; this.nor[v3 + 1] = this.NRM[k3 + 1]; this.nor[v3 + 2] = this.NRM[k3 + 2];
-      this.col[v3] = this.COL[k3]; this.col[v3 + 1] = this.COL[k3 + 1]; this.col[v3 + 2] = this.COL[k3 + 2];
-      const v4 = v * 4, k4 = k * 4; this.sw[v4] = this.SW[k4]; this.sw[v4 + 1] = this.SW[k4 + 1]; this.sw[v4 + 2] = this.SW[k4 + 2]; this.sw[v4 + 3] = this.SW[k4 + 3];
-    } }
-    const a = this.geo.attributes; a.position.needsUpdate = a.normal.needsUpdate = a.color.needsUpdate = a.sw.needsUpdate = true;
-    if (this.tex) this.tex.needsUpdate = true;
-    return true;
-  }
-}
-const NEAR_N = SMALL ? 112 : 128, NEAR_S = 4, FAR_N = SMALL ? 80 : 96, FAR_S = 16;
-const uNear = { value: new THREE.Vector3() };
-const far = new Grid(FAR_N, FAR_S, gridTerrainMat({ far: true, uNear }), false), near = new Grid(NEAR_N, NEAR_S, gridTerrainMat(), true);
-U.uFar.value = FAR_N * FAR_S / 2 + 40; // atmospheric fade reaches the horizon colour at the far-grid edge
-// water: comic shore foam/depth bands, drawn on the terrain grids (depth = -terrain height)
-const waterN = new THREE.Mesh(near.geo, waterMat()); waterN.frustumCulled = false; scene.add(waterN);
-const waterF = new THREE.Mesh(far.geo, waterMat({ far: true, uNear })); waterF.frustumCulled = false; scene.add(waterF);
-// roads: comic-lit textured ribbons; asphalt drawn after/above dirt so trails never paint over highways
-const roads = createRoads(scene, (kind, tex) => {
-  if (tex) { tex.colorSpace = THREE.NoColorSpace; tex.needsUpdate = true; }
-  return kind === 'asphalt' ? roadMat(tex, { offset: -4 }) : kind === 'dirt' ? roadMat(tex, { offset: -2 }) : roadMat(null, { col: 0xb4aca0 });
-});
-let grass = null; grass = createGrass(scene, near, { count: 16000, tile: 72 });
-
-// ---------- scenery: engine region rules (hash per 14 m cell, cached) -> graphics models (instanced, hull outlines) ----------
-const SC = 14, cellCache = new Map();
-function inst(geo, mat, max, hullW) {
-  const m = new THREE.InstancedMesh(geo, mat, max); m.frustumCulled = false; m.count = 0; scene.add(m);
-  m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(max * 3).fill(1), 3);
-  if (hullW) { const h = new THREE.InstancedMesh(geo, objMat({ hull: hullW, wind: mat.uniforms.uWind.value }), max); h.instanceMatrix = m.instanceMatrix; h.frustumCulled = false; h.count = 0; scene.add(h); hulls.push(h); m.userData.hull = h; }
-  return m;
-}
-const treeM = treeVariants().map((g, i) => inst(g, objMat({ wind: 0.035 }), i === 0 ? 1500 : 900, 0.12)); // pine, round, poplar, bush
-const rockM = rockVariants().map(g => inst(g, objMat({ hatch: 1.2 }), 500, 0.12));
-const cactM = cactusVariants().map(g => inst(g, objMat({ wind: 0.01 }), 400, 0.08)); // saguaro, shrub
-const allM = [...treeM, ...rockM, ...cactM];
 const Mx = new THREE.Matrix4(), Qt = new THREE.Quaternion(), Vt = new THREE.Vector3(), St = new THREE.Vector3(), Et = new THREE.Euler(), Cc = new THREE.Color();
-const forest = (x, z) => 0.5 + 0.5 * Math.sin(x * 0.0021 + Math.cos(z * 0.0017) * 2) * Math.cos(z * 0.0025 + Math.sin(x * 0.0013));
+
+// ---------- world adapter: the physics worldQuery contract on top of the terrain module ----------
+const SURF_POOL = Array.from({ length: 16 }, () => ({ name: 'grass', mu: 1, roll: 0, bs: 0, wet: 0, si: 2 })); let surfI = 0; const TS = {};
+let wxGrip = 1; // fog/dust overlay grip (rain/wet grip is already in T.surfaceAt)
+const hpMap = new Map(); // fractional tree HP (terrain stores whole segments 0..3)
+const nArr = [0, 0, 0];
+const world = {
+  heightAt: (x, z) => T.heightAt(x, z),
+  normalAt(x, z, out = { x: 0, y: 1, z: 0 }) { T.normalAt(x, z, nArr); out.x = nArr[0]; out.y = nArr[1]; out.z = nArr[2]; return out; },
+  surfaceAt(x, z) { T.surfaceAt(x, z, TS); const o = SURF_POOL[surfI = (surfI + 1) & 15]; o.name = TS.surfaceName; o.si = TS.surface; o.mu = TS.grip * wxGrip; o.roll = TS.roll; o.bs = TS.bs; o.wet = TS.wet; return o; },
+  waterLevel: WATER,
+  queryTrees(x, z, r, out) {
+    const a = T.queryTrees(x, z, r), res = out || []; if (out) out.length = 0;
+    for (const t of a) { const h = hpMap.has(t.id) ? hpMap.get(t.id) : t.hp; if (h <= 0) continue; res.push({ id: t.id, x: t.pos.x, z: t.pos.z, r: t.radius, hp: h }); }
+    return res;
+  },
+  damageTree(id, removed, cause) {
+    const t = T.getTree(id); if (!t) return 0; const cur = hpMap.has(id) ? hpMap.get(id) : t.hp, rem = cur - removed;
+    if (rem <= 0.05) { hpMap.delete(id); T.removeTree(id); return 0; }
+    hpMap.set(id, rem); T.setTreeHP(id, Math.max(1, Math.ceil(rem - 1e-6))); return rem;
+  },
+};
+
+// ---------- rocks (game scenery rules, hash per 14 m cell): solid colliders + instanced comic rocks ----------
+const SC = 14, cellCache = new Map();
+function inst(geo, mat, max) {
+  const m = new THREE.InstancedMesh(geo, mat, max); m.frustumCulled = false; m.count = 0; scene.add(m);
+  m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(max * 3).fill(1), 3); return m;
+}
+const rockM = rockVariants().map(g => inst(g, objMat({ hatch: 1.2 }), 500));
 function cellObj(ci, cj) {
   const key = ci * 1e5 + cj; let o = cellCache.get(key); if (o !== undefined) return o;
   o = null;
   const h = hash2(ci, cj, 9), x = (ci + hash2(ci, cj, 7)) * SC, z = (cj + hash2(ci, cj, 8)) * SC;
   sample(x, z, SO);
   if (SO.h > WATER + 1.2 && SO.road < 0.05 && SO.rd > 2.5) {
-    normal(x, z, nv); const ny = nv[1], f = forest(x, z), s = 0.7 + hash2(ci, cj, 6) * 0.8, v = hash2(ci, cj, 5), d = SO.dom, R = W.REG;
-    let m = null, col = 1;
-    if (d === R.ALPINE) { if (SO.h < W.snowLine(x, z) - 8 && ny > 0.8 && h < 0.15 + 0.5 * f) m = v < 0.85 ? 0 : 2; else if (h > 0.9) m = 4 + (v < 0.7 ? 0 : 1); }
-    else if (d === R.HILLS) { if (ny > 0.82 && h < 0.08 + 0.45 * f * f) m = h < 0.22 * f ? (v < 0.6 ? 1 : 2) : 0; else if (h > 0.95) m = 4 + (v < 0.6 ? 0 : 1); else if (h > 0.93 && ny > 0.85) m = 3; }
-    else if (d === R.PLAINS) { if (ny > 0.9 && h < 0.04 + 0.2 * f * f * f) m = v < 0.5 ? 1 : v < 0.75 ? 2 : 3; else if (h > 0.985) m = 4 + (v < 0.5 ? 0 : 1); else if (h > 0.965) m = 3; }
-    else if (d === R.DUNES) { if (h > 0.975 && ny > 0.8) m = v < 0.6 ? 6 : 7; else if (h < 0.015) m = 5; }
-    else { if (h > 0.88) m = 4 + (v < 0.5 ? 0 : 1); else if (h < 0.04 && ny > 0.85) m = v < 0.5 ? 6 : 7; }
-    if (m !== null) o = { m, x, z, y: SO.h, s, h, v, red: d === R.CANYON || d === R.DUNES, key };
+    const s = 0.7 + hash2(ci, cj, 6) * 0.8, v = hash2(ci, cj, 5), d = SO.dom, R = W.REG;
+    const thr = d === R.ALPINE ? 0.9 : d === R.HILLS ? 0.95 : d === R.PLAINS ? 0.985 : d === R.DUNES ? 2 : 0.88;
+    if (h > thr) o = { m: v < 0.6 ? 0 : 1, x, z, y: SO.h, s, h, v, red: d === R.CANYON || d === R.DUNES, key };
   }
   if (cellCache.size > 60000) cellCache.clear();
   cellCache.set(key, o); return o;
 }
 let scx = 1e9, scz = 1e9; const colliders = []; // solid rocks: x,z,r
-// breakable scenery (trees, bushes, cacti): x,z,r,key,model. Hit = instantly gone (hash id in a Set, for the session), small speed loss.
-let brk = []; const gone = new Set(), smashes = [];
 function updateScenery(px, pz) {
   const cx = Math.round(px / 28), cz = Math.round(pz / 28); if (cx === scx && cz === scz) return; scx = cx; scz = cz;
-  allM.forEach(m => m.count = 0); colliders.length = 0; brk = [];
+  rockM.forEach(m => m.count = 0); colliders.length = 0;
   const SR = QUAL[qName].sr, r = Math.ceil(SR / SC), ox = Math.floor(px / SC), oz = Math.floor(pz / SC);
   for (let i = -r; i <= r; i++) for (let j = -r; j <= r; j++) {
-    if (i * i + j * j > r * r) continue; const o = cellObj(ox + i, oz + j); if (!o || gone.has(o.key)) continue;
-    const m = allM[o.m]; if (m.count >= m.instanceMatrix.count) continue; const s = o.s, t = 0.85 + 0.25 * o.v;
-    if (o.m === 4 || o.m === 5) { // rocks: canyon/dune rocks are big and red
-      const big = o.red ? 1.8 : 1; Qt.setFromEuler(Et.set(o.h * 9, o.h * 30, o.h * 3)); Mx.compose(Vt.set(o.x, o.y - 0.4, o.z), Qt, St.set(s * big, s * big * (o.red ? 1.3 : 1), s * big));
-      Cc.setRGB(o.red ? 1.35 * t : t, o.red ? 0.85 * t : t, o.red ? 0.62 * t : t * 0.97); colliders.push(o.x, o.z, 2.2 * s * big);
-    } else {
-      Qt.setFromEuler(Et.set(0, o.h * 40, 0)); Mx.compose(Vt.set(o.x, o.y - 0.3, o.z), Qt, St.set(s, s * (0.85 + o.h * 0.6), s));
-      Cc.setRGB(t, t * (0.95 + 0.1 * Math.sin(o.h * 70)), t * 0.95); brk.push(o.x, o.z, o.m === 6 ? 0.6 : o.m === 7 || o.m === 3 ? 0.5 : 0.8 * s, o.key, o.m);
-    }
+    if (i * i + j * j > r * r) continue; const o = cellObj(ox + i, oz + j); if (!o) continue;
+    const m = rockM[o.m]; if (m.count >= m.instanceMatrix.count) continue; const s = o.s, t = 0.85 + 0.25 * o.v, big = o.red ? 1.8 : 1;
+    Qt.setFromEuler(Et.set(o.h * 9, o.h * 30, o.h * 3)); Mx.compose(Vt.set(o.x, o.y - 0.4, o.z), Qt, St.set(s * big, s * big * (o.red ? 1.3 : 1), s * big));
+    Cc.setRGB(o.red ? 1.35 * t : t, o.red ? 0.85 * t : t, o.red ? 0.62 * t : t * 0.97); colliders.push(o.x, o.z, 2.2 * s * big);
     const k = m.count++; m.setMatrixAt(k, Mx); m.setColorAt(k, Cc);
   }
-  for (const m of allM) { m.instanceMatrix.needsUpdate = true; m.instanceColor.needsUpdate = true; if (m.userData.hull) m.userData.hull.count = m.count; }
+  for (const m of rockM) { m.instanceMatrix.needsUpdate = true; m.instanceColor.needsUpdate = true; }
 }
-function checkBreak() { // called per physics step
-  const p = veh.p, v = veh.v;
-  for (let i = 0; i < brk.length; i += 5) {
-    const dx = p.x - brk[i], dz = p.z - brk[i + 1], r = brk[i + 2] + 1.3; if (dx * dx + dz * dz > r * r) continue;
-    if (p.y - ground(brk[i], brk[i + 1]) > 7) continue;
-    const m = brk[i + 4], k = m <= 2 ? 0.92 : m === 6 ? 0.95 : 0.98; v.x *= k; v.z *= k; // trees cost ~8% speed, bushes almost nothing
-    gone.add(brk[i + 3]); smashes.push([brk[i], brk[i + 1], m]); brk.splice(i, 5); i -= 5; scx = 1e9;
+function collideRocks(s) { // circle push-out + bounce on the physics state (after each 120 Hz step)
+  const p = s.p, v = s.v, rr = (s.P.dims ? Math.max(s.P.dims[0], s.P.dims[2]) * 0.4 : 1.4);
+  for (let i = 0; i < colliders.length; i += 3) {
+    const dx = p.x - colliders[i], dz = p.z - colliders[i + 1], r = colliders[i + 2] + rr, d2 = dx * dx + dz * dz; if (d2 > r * r || d2 < 1e-6) continue;
+    if (p.y - T.heightAt(colliders[i], colliders[i + 1]) > colliders[i + 2] * 1.4 + 1) continue;
+    const d = Math.sqrt(d2), nx = dx / d, nz = dz / d; p.x += nx * (r - d); p.z += nz * (r - d);
+    const vn = v.x * nx + v.z * nz; if (vn < 0) { v.x -= 1.4 * vn * nx; v.z -= 1.4 * vn * nz; if (vn < -5) { bus.emit('crash', { value: -vn, cause: 'rock' }); PH.addDamage(s, -vn * 0.4, 'rock'); } }
   }
 }
 
-// ---------- vehicle (engine physics) + buggy visuals (graphics models) ----------
-let vName = localStorage.getItem('sinerally_veh'); if (!VEHICLES[vName]) vName = 'buggy';
-const veh = new Vehicle(VEHICLES[vName]);
-veh.assist.stab = localStorage.getItem('sinerally_stab') ? localStorage.getItem('sinerally_stab') === '1' : isTouch; // stability assist: default on for phones
-veh.assist.tc = localStorage.getItem('sinerally_tc') !== '0';
-// per-vehicle visual fit: model scale, model wheel-centre height (model units), flame position; physics wheel centres come from cfg
-const VIS = { buggy: { mk: buggy, s: [0.85, 0.9, 0.97], wc: 0.68, z: 0.02, flame: [0, 1.2, -2.5] }, truck: { mk: truck, s: [1, 1, 1], wc: 0.64, z: 0.02, flame: [0, 1.0, -2.6] },
-  quad: { mk: quadModel, s: [1, 1, 1], wc: 0.49, z: 0.03, flame: [0, 0.85, -1.75] } };
+// ---------- vehicle (physics module rig) + visuals (vehicle module models, comic materials) ----------
+const rig = createRig({ THREE, world, emit: (t, d) => bus.emit(t, d) });
 const carMat = objMat({ hatch: 0.5 }), flameMat = objMat({ unlit: true });
-const car = new THREE.Group(); scene.add(car);
-const body = new THREE.Group(); car.add(body);
-const wheelMeshes = [0, 1, 2, 3].map(() => { const g = new THREE.Group(); scene.add(g); return g; });
+const carRoot = new THREE.Group(); scene.add(carRoot);
 const shadow = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), decalMat(0x203040, true)); scene.add(shadow);
-let VIS_UP = 0, flame = null;
-function buildCar() {
-  const c = veh.c, V = VIS[vName], B = V.B || (V.B = V.mk()), VIS_R = c.wheelR * 1.22; VIS_UP = VIS_R - c.wheelR;
-  const ywc = c.hard[0][1] - (c.rest - c.mass * c.g / 4 / c.k); // static wheel-centre height in the body frame
-  body.clear(); body.scale.set(...V.s); body.position.set(0, ywc + VIS_UP - V.wc * V.s[1], V.z);
-  body.add(new THREE.Mesh(B.body, carMat)); flame = new THREE.Mesh(B.flame, flameMat); flame.position.set(...V.flame); body.add(flame);
-  wheelMeshes.forEach(g => { g.clear(); const w = new THREE.Mesh(B.wheel, carMat); w.scale.setScalar(VIS_R / 0.68); g.add(w); });
-  shadow.userData.w = c.dims[0] * 1.5; shadow.userData.l = c.dims[2] * 1.05;
+let vis = null, flameOrig = null, veh = null, vDef = null;
+const assist = { stab: localStorage.getItem('sinerally_stab') ? localStorage.getItem('sinerally_stab') === '1' : isTouch, tc: localStorage.getItem('sinerally_tc') !== '0' };
+const cmatCache = new Map();
+function comicify(root) { // attachments ship standard three.js materials: swap them for cached comic objMats (tint = their colour)
+  root.traverse(o => {
+    if (!o.isMesh || !o.material || Array.isArray(o.material) || o.material.isShaderMaterial || o.material.transparent) return;
+    const m = o.material; let c = cmatCache.get(m.uuid);
+    if (!c) { c = objMat({ tint: m.color ? m.color.getHex() : 0xffffff, unlit: !!m.isMeshBasicMaterial, hatch: 0.6 }); cmatCache.set(m.uuid, c); }
+    o.material = c;
+  });
 }
-buildCar();
-function setVehicle(n) { if (!VEHICLES[n]) return; vName = n; localStorage.setItem('sinerally_veh', n); const x = veh.p.x, z = veh.p.z, yaw = veh.yaw; veh.setCfg(VEHICLES[n]); buildCar(); spawn(x, z, yaw); msg(VEHICLES[n].name); }
-function spawn(x, z, yaw = 0) { for (let k = 0; k < 200 && height(x, z) < WATER + 2; k++) { x += 37; z += 23; } veh.spawn(x, z, yaw); }
+function loadAttach(id) { return store.get('srp_attach_' + id, getVehicle(id).defaultAttachments || []); }
+function useVehicle(id, attach) {
+  id = getVehicle(id).id; const a = attach || loadAttach(id);
+  if (vis) { vis.group.remove(rig.root); carRoot.remove(vis.group); if (flameOrig) vis.flame.material = flameOrig; vis.dispose(); }
+  rig.setVehicle(id, a); veh = rig.state; vDef = rig.vehicle; veh.assist.stab = assist.stab; veh.assist.tc = assist.tc; lastGear = veh.gear;
+  vis = buildVehicle(THREE, vDef, carMat); flameOrig = vis.flame.material; vis.flame.material = flameMat;
+  vis.group.add(rig.root); carRoot.add(vis.group); comicify(rig.root);
+  const d = veh.P.dims || [2, 1.5, 4.4]; shadow.userData.w = d[0] * 1.5; shadow.userData.l = d[2] * 1.05;
+  store.set('srp_vehicle', id); store.set('srp_attach_' + id, rig.attach); localStorage.setItem('sinerally_veh', id);
+  return vDef;
+}
+function setVehicle(id) { if (id === vDef?.id) return; const x = veh.p.x, z = veh.p.z, yaw = PH.yawOf(veh); useVehicle(id); spawn(x, z, yaw); msg(vDef.name); }
+function setAttachments(ids) { rig.setAttachments(ids); comicify(rig.root); store.set('srp_attach_' + vDef.id, rig.attach); return rig.attach; }
+function spawn(x, z, yaw = 0) { for (let k = 0; k < 200 && height(x, z) < WATER + 2; k++) { x += 37; z += 23; } PH.spawn(veh, world, x, z, yaw); lastGear = veh.gear; }
+const fwdSpeed = () => veh.v.x * veh.fwd.x + veh.v.y * veh.fwd.y + veh.v.z * veh.fwd.z;
+{ let id = QS.get('car') || store.get('srp_vehicle', null) || localStorage.getItem('sinerally_veh') || DEFAULT_VEHICLE; if (!listVehicles().some(v => v.id === id)) id = DEFAULT_VEHICLE; useVehicle(id); }
 { const t = nearTrack(0, 0), p = trackPoint(t, 0), q = trackPoint(t, 0.02); spawn(p[0], p[1], Math.atan2(q[0] - p[0], q[1] - p[1])); }
 
 // ---------- dust puffs (comic, 1 draw call) ----------
@@ -218,7 +180,7 @@ const PN = 220, pPos = new Float32Array(PN * 3), pCol = new Float32Array(PN * 3)
 const pGeo = new THREE.BufferGeometry(); pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3)); pGeo.setAttribute('color', new THREE.BufferAttribute(pCol, 3)); pGeo.setAttribute('size', new THREE.BufferAttribute(pSize, 1));
 const puffs = new THREE.Points(pGeo, puffMat()); puffs.frustumCulled = false; scene.add(puffs); let pNext = 0;
 const PUFFC = [[.82, .82, .84], [.95, .78, .55], [.86, .9, .7], [.98, .9, .62], [.82, .76, .74], [.97, .98, 1], [.62, .5, .38]]; // per surface
-function emit(x, y, z, vx, vy, vz, size, life, col) { const i = pNext; pNext = (pNext + 1) % PN; pPos.set([x, y, z], i * 3); pVel.set([vx, vy, vz], i * 3); pCol.set(col, i * 3); pAge[i] = 0; pLife[i] = life; pS0[i] = size; }
+function puff(x, y, z, vx, vy, vz, size, life, col) { const i = pNext; pNext = (pNext + 1) % PN; pPos.set([x, y, z], i * 3); pVel.set([vx, vy, vz], i * 3); pCol.set(col, i * 3); pAge[i] = 0; pLife[i] = life; pS0[i] = size; }
 function updatePuffs(dt) {
   for (let i = 0; i < PN; i++) { if (pAge[i] > pLife[i]) { pSize[i] = 0; continue; } pAge[i] += dt; const k = pAge[i] / pLife[i];
     pPos[i * 3] += pVel[i * 3] * dt; pPos[i * 3 + 1] += pVel[i * 3 + 1] * dt; pPos[i * 3 + 2] += pVel[i * 3 + 2] * dt; pVel[i * 3 + 1] += 0.5 * dt; pVel[i * 3] *= 1 - 2 * dt; pVel[i * 3 + 2] *= 1 - 2 * dt;
@@ -234,7 +196,6 @@ function skid(w, x, y, z, rx, rz, on) {
   const a = [p[0] - rx * hw, p[1], p[2] - rz * hw], b = [p[0] + rx * hw, p[1], p[2] + rz * hw], c = [x - rx * hw, y, z - rz * hw], d = [x + rx * hw, y, z + rz * hw];
   skPos.set([...a, ...c, ...b, ...b, ...c, ...d], o); skNext = (skNext + 1) % SKN; skGeo.attributes.position.needsUpdate = true;
 }
-
 // ---------- input ----------
 const key = {}; addEventListener('keydown', e => { key[e.code] = 1; if (e.code === 'KeyR') reset(); if (e.code === 'KeyF') toggleDbg(); if (e.code === 'KeyG') cycleQ(); });
 addEventListener('keyup', e => key[e.code] = 0);
@@ -258,7 +219,7 @@ $('tTilt').onclick = async () => {
 addEventListener('deviceorientation', e => { const a = (screen.orientation && screen.orientation.angle) || window.orientation || 0; const v = a === 90 ? e.beta : a === -90 || a === 270 ? -e.beta : e.gamma; tiltSteer = Math.max(-1, Math.min(1, (v || 0) / 25)); });
 $('tReset').onclick = () => reset(); $('tDbg').onclick = () => toggleDbg(); $('tQ').onclick = () => cycleQ();
 let dbg = QS.has('dbg'); function toggleDbg() { dbg = !dbg; if (!dbg) $('dbg').textContent = ''; }
-function reset() { const n = [0, 0, 0]; let x = veh.p.x, z = veh.p.z, yaw = veh.yaw; for (let k = 0; k < 40; k++) { normal(x, z, n); if (n[1] > 0.9 && height(x, z) > WATER + 2) break; x += 6 * Math.sin(yaw + k); z += 6 * Math.cos(yaw + k); } spawn(x, z, yaw); }
+function reset() { if (editorOpen()) return; const n = [0, 0, 0]; let x = veh.p.x, z = veh.p.z, yaw = PH.yawOf(veh); for (let k = 0; k < 40; k++) { normal(x, z, n); if (n[1] > 0.9 && height(x, z) > WATER + 2) break; x += 6 * Math.sin(yaw + k); z += 6 * Math.cos(yaw + k); } spawn(x, z, yaw); }
 const inp = { gas: 0, brake: 0, steer: 0, hand: 0, boost: 0, pitch: 0 };
 const auto = QS.get('auto'); // test driver: ?auto=1|drift|boost drives itself (headless tests / screenshots)
 let simT = 0, steerSm = 0;
@@ -266,7 +227,7 @@ function readInput(dt) {
   let s = (key.KeyA || key.ArrowLeft ? 1 : 0) - (key.KeyD || key.ArrowRight ? 1 : 0) - touch.steer - (tilt ? tiltSteer : 0);
   // touch/tilt: response curve (fine control around centre) + extra speed sensitivity; everything is smoothed
   let kb = (key.KeyA || key.ArrowLeft ? 1 : 0) - (key.KeyD || key.ArrowRight ? 1 : 0), tc = -touch.steer - (tilt ? tiltSteer : 0);
-  tc = Math.sign(tc) * Math.pow(Math.min(1, Math.abs(tc)), 1.5) / (1 + Math.abs(veh.v.dot(veh.fwd)) * 0.012);
+  tc = Math.sign(tc) * Math.pow(Math.min(1, Math.abs(tc)), 1.5) / (1 + Math.abs(fwdSpeed()) * 0.012);
   const tgt = Math.max(-1, Math.min(1, kb + tc));
   if (kb) steerSm += Math.max(-5 * dt, Math.min(5 * dt, tgt - steerSm)); else steerSm += (tgt - steerSm) * Math.min(1, 12 * dt);
   inp.steer = Math.abs(steerSm) < 1e-3 ? 0 : steerSm; void s;
@@ -277,14 +238,13 @@ function readInput(dt) {
 }
 
 // ---------- race: comic gates/props merged per loop track ----------
-const NCP = 8, propMat = objMat({ gate: true, hatch: 0.8 }); let propMesh = null, propHull = null;
+const NCP = 8, propMat = objMat({ gate: true, hatch: 0.8 }); let propMesh = null;
 let curTrack = null, race = null, cps = []; const best = JSON.parse(localStorage.getItem('sinerally_best') || '{}');
 function cpPos(t, i) { const th = i / NCP * Math.PI * 2, p = trackPoint(t, th), q = trackPoint(t, th + 0.01); return { x: p[0], z: p[1], ang: Math.atan2(q[0] - p[0], q[1] - p[1]) }; }
 function buildGates(t) {
   curTrack = t; cps = Array.from({ length: NCP }, (_, i) => cpPos(t, i));
-  if (propMesh) { scene.remove(propMesh); propMesh.geometry.dispose(); scene.remove(propHull); hulls.splice(hulls.indexOf(propHull), 1); }
-  const g = trackProps(cps, ground); propMesh = new THREE.Mesh(g, propMat); scene.add(propMesh);
-  propHull = new THREE.Mesh(g, objMat({ hull: 0.08 })); propHull.visible = !QUAL[qName].post; scene.add(propHull); hulls.push(propHull);
+  if (propMesh) { scene.remove(propMesh); propMesh.geometry.dispose(); }
+  const g = trackProps(cps, T.heightAt); propMesh = new THREE.Mesh(g, propMat); scene.add(propMesh);
 }
 let msgT = 0; function msg(s) { $('msg').textContent = s; $('msg').classList.remove('pop'); void $('msg').offsetWidth; $('msg').classList.add('pop'); msgT = 2; }
 const fmt = t => (t / 60 | 0) + ':' + (t % 60).toFixed(2).padStart(5, '0');
@@ -319,58 +279,98 @@ function minimap(yaw) {
   mc.fillStyle = '#ff6a1a'; mc.strokeStyle = '#111'; mc.lineWidth = 2; mc.beginPath(); mc.moveTo(Wd / 2, Wd / 2 - 8); mc.lineTo(Wd / 2 - 6, Wd / 2 + 6); mc.lineTo(Wd / 2 + 6, Wd / 2 + 6); mc.closePath(); mc.fill(); mc.stroke();
   mc.fillStyle = '#fff'; mc.font = 'bold 11px sans-serif'; mc.textAlign = 'center'; mc.fillText(Math.round(Math.hypot(s.x - px, s.z - pz)) + ' m', Wd / 2, Wd - 10);
 }
-// ---------- HUD gauge (comic ink): tacho arc, gear, rpm, surface ----------
+// ---------- HUD gauge (comic ink): tacho arc, gear, rpm, surface + engine temperature bar (physics heat) ----------
 const gc = $('gauge').getContext('2d');
 function gauge() {
-  const Wd = 200, Hd = 120, cx = 100, cy = 104, R = 82; gc.clearRect(0, 0, Wd, Hd);
-  const a0 = Math.PI * 0.95, a1 = Math.PI * 2.05, GM = veh.c.redline + 1000, rf = Math.min(1, veh.rpm / GM), red = veh.c.redline / GM;
+  const Wd = 200, Hd = 120, cx = 100, cy = 104, R = 82, P = veh.P; gc.clearRect(0, 0, Wd, Hd);
+  const a0 = Math.PI * 0.95, a1 = Math.PI * 2.05, GM = P.redline + 1000, rf = Math.min(1, veh.rpm / GM), red = P.redline / GM;
   gc.lineCap = 'butt'; gc.lineWidth = 20; gc.strokeStyle = '#111'; gc.beginPath(); gc.arc(cx, cy, R, a0 - 0.03, a1 + 0.03); gc.stroke();
   gc.lineWidth = 13; gc.strokeStyle = '#fff8e0'; gc.beginPath(); gc.arc(cx, cy, R, a0, a1); gc.stroke();
   gc.strokeStyle = '#e8453c'; gc.beginPath(); gc.arc(cx, cy, R, a0 + (a1 - a0) * red, a1); gc.stroke();
-  gc.strokeStyle = veh.rpm > veh.c.up ? '#ff3a1a' : '#ff8a1a'; gc.beginPath(); gc.arc(cx, cy, R, a0, a0 + (a1 - a0) * rf); gc.stroke();
+  gc.strokeStyle = veh.rpm > P.up ? '#ff3a1a' : '#ff8a1a'; gc.beginPath(); gc.arc(cx, cy, R, a0, a0 + (a1 - a0) * rf); gc.stroke();
   gc.strokeStyle = '#111'; gc.lineWidth = 2; for (let i = 0; i <= 8; i++) { const a = a0 + (a1 - a0) * i / 8; gc.beginPath(); gc.moveTo(cx + Math.cos(a) * (R - 7), cy + Math.sin(a) * (R - 7)); gc.lineTo(cx + Math.cos(a) * (R + 7), cy + Math.sin(a) * (R + 7)); gc.stroke(); }
   gc.textAlign = 'center'; gc.lineJoin = 'round'; gc.fillStyle = '#ffd23c'; gc.strokeStyle = '#111';
-  const ink = (t, x, y, f, lw) => { gc.font = f; gc.lineWidth = lw; gc.fillStyle = '#111'; gc.fillText(t, x + 3, y + 3); gc.strokeText(t, x, y); gc.fillStyle = '#ffd23c'; gc.fillText(t, x, y); };
+  const ink = (t, x, y, f, lw, col = '#ffd23c') => { gc.font = f; gc.lineWidth = lw; gc.fillStyle = '#111'; gc.fillText(t, x + 3, y + 3); gc.strokeText(t, x, y); gc.fillStyle = col; gc.fillText(t, x, y); };
   ink(veh.gear < 0 ? 'R' : String(veh.gear), cx, cy - 14, 'italic 900 46px "Arial Black",system-ui', 5);
   gc.fillStyle = '#fff'; gc.font = 'italic 900 11px "Arial Black",system-ui'; gc.lineWidth = 3;
   const lbl = (t, x, y) => { gc.strokeText(t, x, y); gc.fillText(t, x, y); };
-  lbl((veh.rpm / 1000).toFixed(1) + 'K RPM', cx - 56, cy + 12); lbl(W.SURF_NAMES[veh.wheels[2].surf].toUpperCase(), cx + 56, cy + 12);
+  lbl((veh.rpm / 1000).toFixed(1) + 'K RPM', cx - 56, cy + 12); lbl(String(TEL.surface || '').toUpperCase(), cx + 56, cy + 12);
+  // temperature: small inked bar under the gear (blue -> yellow -> red), HOT / OVERHEAT tag
+  const H = P.heat, tk = Math.max(0, Math.min(1, (veh.heat.temp - H.ambient) / (H.max - H.ambient))), hot = veh.heat.temp >= H.hot;
+  const bx = cx - 30, by = cy - 6, bw = 60; gc.fillStyle = '#111'; gc.fillRect(bx - 2, by - 2, bw + 4, 9);
+  gc.fillStyle = veh.heat.temp >= H.overheat ? '#ff3a1a' : hot ? '#ffb020' : '#4fb8ff'; gc.fillRect(bx, by, bw * tk, 5);
+  if (hot) ink(veh.heat.cut ? 'ENGINE CUT' : veh.heat.over ? 'OVERHEAT' : 'HOT', cx, 16, 'italic 900 13px "Arial Black",system-ui', 3, veh.heat.over ? '#ff5030' : '#ffd23c');
 }
 
+// ---------- tree HP labels (max ~10 near the car, pooled DOM) + pop text + bursts (physics/terrain events) ----------
+const labelsEl = $('labels'), hpLabs = [], recentHit = new Map(); const MAXLAB = isTouch ? 8 : 10;
+for (let i = 0; i < MAXLAB; i++) { const d = document.createElement('div'); d.className = 'hp'; d.innerHTML = '<div class="segs"><div class="seg"><i></i></div><div class="seg"><i></i></div><div class="seg"><i></i></div></div><span></span>'; d.style.display = 'none'; labelsEl.appendChild(d); hpLabs.push(d); }
+const pv = new THREE.Vector3();
+function project(x, y, z) { pv.set(x, y, z).project(camera); if (pv.z > 1 || pv.z < -1) return null; return [(pv.x * 0.5 + 0.5) * innerWidth, (-pv.y * 0.5 + 0.5) * innerHeight]; }
+let labT = 0, labTrees = [];
+function updateLabels(dt) {
+  labT -= dt; const now = performance.now();
+  if (labT <= 0) { labT = 0.12; const all = world.queryTrees(veh.p.x, veh.p.z, 32); for (const t of all) t.d = Math.hypot(t.x - veh.p.x, t.z - veh.p.z);
+    all.sort((a, b) => ((b.hp < 3 || recentHit.has(b.id)) - (a.hp < 3 || recentHit.has(a.id))) || a.d - b.d); let full = 0; labTrees = all.filter(t => t.hp < 3 || recentHit.has(t.id) || (t.d < 14 && full++ < 3)).slice(0, MAXLAB); } // damaged/hit trees + the 3 nearest intact ones
+  for (let i = 0; i < MAXLAB; i++) { const d = hpLabs[i], t = labTrees[i]; let sp = null;
+    if (t) { const tr = T.getTree(t.id); if (!tr) { d.style.display = 'none'; continue; } t.hp = hpMap.has(t.id) ? hpMap.get(t.id) : tr.hp; sp = project(t.x, tr.pos.y + Math.min(tr.height, 6) * 0.55 + 1, t.z); }
+    if (!sp) { d.style.display = 'none'; continue; }
+    d.style.display = 'block'; d.style.left = sp[0] + 'px'; d.style.top = Math.max(70, sp[1]) + 'px'; const h = t.hp, segs = d.firstChild.children, hit = (recentHit.get(t.id) || 0) > now; // label clamped below the top HUD row
+    for (let k = 0; k < 3; k++) { const f = Math.max(0, Math.min(1, h - k)); segs[k].firstChild.style.width = (f * 100) + '%'; segs[k].firstChild.style.background = h > 2 ? '#7fe07f' : h > 1 ? '#ffd23c' : '#ff8a1a'; }
+    d.classList.toggle('hit', hit); d.lastChild.textContent = h.toFixed(1) + '/3 HP'; d.style.opacity = t.d > 24 && !hit ? 0.6 : 1;
+  }
+}
+function popText(txt, x, y, z, col) {
+  const sp = project(x, y, z); if (!sp) return; const d = document.createElement('div'); d.className = 'ptxt'; d.textContent = txt; if (col) d.style.color = col;
+  d.style.left = sp[0] + 'px'; d.style.top = sp[1] + 'px'; labelsEl.appendChild(d);
+  requestAnimationFrame(() => { d.style.transform = 'translate(-50%,-180%) scale(1.15)'; d.style.opacity = 0; }); setTimeout(() => d.remove(), 950);
+}
+function burst(x, y, z, n, col, spd = 4) { for (let k = 0; k < n; k++) { const a = Math.random() * 6.28; puff(x + Math.cos(a), y + Math.random() * 3, z + Math.sin(a), Math.cos(a) * spd + veh.v.x * 0.2, 2 + Math.random() * 3, Math.sin(a) * spd + veh.v.z * 0.2, 1 + Math.random(), 0.8, k % 3 ? col : [0.5, 0.36, 0.22]); } }
+// physics -> terrain: engine heat ignites dry grass under the car; tree contacts already went through world.damageTree
+bus.on('engine:hot', d => { const p = d.position; T.engineHot({ position: { x: p[0], z: p[2] }, intensity: d.intensity }); });
+bus.on('engine:overheat', d => { const p = d.position; T.engineOverheat({ position: { x: p[0], z: p[2] }, temp: d.temp }); msg('OVERHEAT!'); for (let k = 0; k < 10; k++) puff(p[0], p[1] + 0.5, p[2], (Math.random() - .5) * 2, 2 + Math.random() * 2, (Math.random() - .5) * 2, 1.4, 1.2, [0.35, 0.33, 0.32]); });
+bus.on('engine:cooled', () => msg('ENGINE COOLED'));
+bus.on('tree:damage', d => { recentHit.set(d.id, performance.now() + 1600); labT = 0; const y = T.heightAt(d.x, d.z);
+  if (d.cause !== 'harvest') { popText('-' + d.hp.toFixed(1) + ' HP', d.x, y + 4, d.z); burst(d.x, y, d.z, 6, [0.35, 0.62, 0.25]); shake = Math.max(shake, 0.15); } });
+bus.on('tree:destroyed', d => { const y = T.heightAt(d.x, d.z); popText(d.cause === 'harvest' ? 'TIMBER!' : 'SMASH!', d.x, y + 5, d.z, '#ffd23c'); burst(d.x, y, d.z, 14, [0.35, 0.62, 0.25], 5); shake = Math.max(shake, 0.25); });
+bus.on('harvester:log', d => popText('+' + d.logs + ' LOG', veh.p.x, veh.p.y + 2.5, veh.p.z, '#ffd23c'));
+bus.on('harvester:full', () => msg('LOG RACK FULL'));
+bus.on('cargo:unload', d => msg('UNLOADED ' + (d && d.logs != null ? d.logs + ' LOGS' : '')));
+bus.on('vehicle:damage', d => { if (d && d.total >= 99) msg('WRECKED — REPAIR IN ☰'); });
+bus.on('land', d => { shake = Math.min(1, d.value / 14); if (d.air > 1) msg('AIR ' + d.air.toFixed(1) + 's!');
+  if (d.value > 4) { const si = surfIdx(veh.wheels[2].surf); for (let k = 0; k < 14; k++) { const a = k / 14 * 6.28; puff(veh.p.x + Math.cos(a) * 1.6, veh.p.y - 0.7, veh.p.z + Math.sin(a) * 1.6, Math.cos(a) * 7, 0.8, Math.sin(a) * 7, 1.6, 0.7, PUFFC[si]); } } });
+bus.on('crash', d => shake = Math.max(shake, Math.min(1, d.value / 12)));
+bus.on('recover', () => msg('RECOVERED'));
+const surfIdx = s => typeof s === 'object' && s ? (s.si ?? 2) : Math.max(0, W.SURF_NAMES.indexOf(s));
 
-// ---------- day/night cycle (12 min) + dynamic weather (affects grip, fog distance, palette) ----------
-const BASE_FAR = U.uFar.value, CYCLE = 720, TIMES = { Day: 0.4, Sunset: 0.715, Night: 0.97 };
+// ---------- day/night + weather: ONE system (terrain weather owns sky, rain, wet ground, lightning, uFar/uNight/uRain).
+// The game only adds its fog/dust overlay on top (no second rain), and maps its menu / ?wx= / ?tod= onto T.setRain / T.setTimeOfDay.
+const TIMES = { Day: 0.4, Sunset: 0.715, Night: 0.97 };
 let timeMode = localStorage.getItem('sinerally_time') || 'Auto', tod = +(QS.get('tod') || 0.36); if (QS.get('tod')) timeMode = 'Fixed';
-const WXP = { clear: { far: 1, grip: 1, dark: 1, hz: null }, rain: { far: 0.5, grip: 0.8, dark: 0.68, hz: new THREE.Color(0x7d8aa0) },
-  fog: { far: 0.34, grip: 0.96, dark: 0.85, hz: new THREE.Color(0xc9d0d6) }, dust: { far: 0.3, grip: 0.9, dark: 0.82, hz: new THREE.Color(0xd99a5c) } };
-let wxMode = QS.get('wx') || localStorage.getItem('sinerally_wx') || 'Auto'; const wx = { clear: 1, rain: 0, fog: 0, dust: 0 }; let wxTarget = 'clear';
-if (WXP[wxMode]) { for (const k in wx) wx[k] = k === wxMode ? 1 : 0; }
-const C_DAY_H = new THREE.Color(0xd9f1ff), C_DAY_Z = new THREE.Color(0x1f74e0), C_DUSK_H = new THREE.Color(0xffad6e), C_DUSK_Z = new THREE.Color(0x4f4aa8),
-  C_NIGHT_H = new THREE.Color(0x1d2b4e), C_NIGHT_Z = new THREE.Color(0x060a1c), L_DAY = new THREE.Color(1, 1, 1), L_DUSK = new THREE.Color(1.12, 0.8, 0.6), L_NIGHT = new THREE.Color(0.34, 0.4, 0.68);
-const sunV = new THREE.Vector3(), tmpC = new THREE.Color();
-const precipN = 1400, prPos = new Float32Array(precipN * 6), prTail = new Float32Array(precipN * 2), prSeed = new Float32Array(precipN * 2);
+const WXP = { fog: { far: 0.34, grip: 0.96, dark: 0.85, hz: new THREE.Color(0xc9d0d6) }, dust: { far: 0.3, grip: 0.9, dark: 0.82, hz: new THREE.Color(0xd99a5c) } };
+const WX_MODES = ['Auto', 'clear', 'rain', 'storm', 'fog', 'dust'];
+let wxMode = QS.get('wx') || localStorage.getItem('sinerally_wx') || 'Auto'; if (!WX_MODES.includes(wxMode)) wxMode = 'Auto';
+const wx = { fog: 0, dust: 0 }; if (WXP[wxMode]) wx[wxMode] = 1;
+function applyTime() { if (timeMode === 'Auto') T.setTimeOfDay(tod, true); else T.setTimeOfDay(TIMES[timeMode] ?? tod, false); }
+function applyWx() { T.setRain(wxMode === 'Auto' ? 'auto' : wxMode === 'rain' ? 'on' : wxMode === 'storm' ? 'storm' : 'off'); }
+applyTime(); applyWx(); T.snapWeather();
+const precipN = 900, prPos = new Float32Array(precipN * 6), prTail = new Float32Array(precipN * 2), prSeed = new Float32Array(precipN * 2);
 for (let i = 0; i < precipN; i++) { const x = Math.random(), y = Math.random(), z = Math.random(), sd = Math.random(); prPos.set([x, y, z, x, y, z], i * 6); prTail.set([0, 1], i * 2); prSeed.set([sd, sd], i * 2); }
 const prGeo = new THREE.BufferGeometry(); prGeo.setAttribute('position', new THREE.BufferAttribute(prPos, 3)); prGeo.setAttribute('tail', new THREE.BufferAttribute(prTail, 1)); prGeo.setAttribute('seed', new THREE.BufferAttribute(prSeed, 1));
-const precip = new THREE.LineSegments(prGeo, precipMat()); precip.frustumCulled = false; precip.renderOrder = 5; scene.add(precip);
-const sstep = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
-function atmosphere(dt) {
-  if (timeMode === 'Auto') tod = (tod + dt / CYCLE) % 1; else if (TIMES[timeMode] !== undefined) tod = TIMES[timeMode];
-  const a = (tod - 0.25) * Math.PI * 2, el = Math.sin(a);
-  const day = sstep(-0.1, 0.22, el), night = 1 - sstep(-0.22, 0.0, el), dusk = day * (1 - sstep(0.05, 0.42, el));
-  if (el > -0.08) sunV.set(Math.cos(a) * 0.85, Math.max(el, 0.2), 0.5); else sunV.set(-Math.cos(a) * 0.85, Math.max(-el, 0.45), -0.5); // moon light at night
-  U.uSun.value.copy(sunV.normalize());
-  const L = U.uLight.value.copy(L_NIGHT).lerp(L_DAY, day).lerp(L_DUSK, dusk);
-  const H = U.uHorizon.value.copy(C_NIGHT_H).lerp(C_DAY_H, day).lerp(C_DUSK_H, dusk), Z = U.uZenith.value.copy(C_NIGHT_Z).lerp(C_DAY_Z, day).lerp(C_DUSK_Z, dusk * 0.8);
-  // weather: auto picks a state per 150 s slot (dust only in deserts/canyons, no rain there)
-  if (wxMode === 'Auto') { const slot = Math.floor(simT / 150), h = hash2(slot, 3, 31), d = SO.dom, dry = d === W.REG.DUNES || d === W.REG.CANYON;
-    wxTarget = h < 0.5 ? 'clear' : h < 0.68 ? (dry ? 'dust' : 'rain') : h < 0.84 ? 'fog' : (dry ? 'dust' : 'clear'); } else if (WXP[wxMode]) wxTarget = wxMode;
-  let far = 0, grip = 0, dark = 0; for (const k in wx) { wx[k] += ((k === wxTarget ? 1 : 0) - wx[k]) * Math.min(1, dt * 0.2); far += wx[k] * WXP[k].far; grip += wx[k] * WXP[k].grip; dark += wx[k] * WXP[k].dark;
-    if (WXP[k].hz && wx[k] > 0.001) { tmpC.copy(WXP[k].hz).multiply(L); H.lerp(tmpC, wx[k] * 0.85); Z.lerp(tmpC, wx[k] * 0.6); } }
-  L.multiplyScalar(dark); U.uFar.value = BASE_FAR * far * (1 - night * 0.25); veh.gripMul = grip; U.uNight.value = night; U.uRain.value = wx.rain;
-  U.uHeadK.value = Math.max(sstep(0.25, 0.7, night), sstep(0.4, 0.9, wx.fog + wx.dust + wx.rain) * 0.6); U.uAmb.value = 0.6 + 0.4 * day;
-  const pm = precip.material.uniforms; if (wx.rain >= wx.dust) { pm.uCol.value.set(0xc8d8ff); pm.uVel.value.set(3, -30, 1.5); pm.uLen.value = 0.045; pm.uBox.value = 36; pm.uAmt.value = wx.rain; }
-  else { pm.uCol.value.set(0xe8b878); pm.uVel.value.set(16, -1.5, 7); pm.uLen.value = 0.12; pm.uBox.value = 30; pm.uAmt.value = wx.dust * 0.9; }
-  precip.visible = pm.uAmt.value > 0.02; sky.material.uniforms.uNight.value = night;
+const dustFx = new THREE.LineSegments(prGeo, precipMat()); dustFx.frustumCulled = false; dustFx.renderOrder = 5; scene.add(dustFx); // dust streaks only (rain = terrain)
+{ const pm = dustFx.material.uniforms; pm.uCol.value.set(0xe8b878); pm.uVel.value.set(16, -1.5, 7); pm.uLen.value = 0.12; pm.uBox.value = 30; }
+const tmpC = new THREE.Color(); let domT = 0, dryHere = false;
+function atmosphere(dt) { // runs after T.update(): overlay fog/dust on the terrain weather's uniforms
+  if ((domT -= dt) <= 0) { domT = 1; sample(veh.p.x, veh.p.z, SO); dryHere = SO.dom === W.REG.DUNES || SO.dom === W.REG.CANYON; }
+  let tgt = WXP[wxMode] ? wxMode : null;
+  if (wxMode === 'Auto') { const slot = Math.floor(simT / 150), h = hash2(slot, 3, 31); tgt = h < 0.55 ? null : h < 0.72 ? (dryHere ? 'dust' : null) : h < 0.86 ? 'fog' : (dryHere ? 'dust' : null); }
+  let far = 1, grip = 1, dark = 1; const L = U.uLight.value, H = U.uHorizon.value, Z = U.uZenith.value;
+  for (const k in wx) { wx[k] += ((k === tgt ? 1 : 0) - wx[k]) * Math.min(1, dt * 0.2); const P = WXP[k], w = wx[k];
+    far *= 1 + (P.far - 1) * w; grip *= 1 + (P.grip - 1) * w; dark *= 1 + (P.dark - 1) * w;
+    if (w > 0.001) { tmpC.copy(P.hz).multiply(L); H.lerp(tmpC, w * 0.85); Z.lerp(tmpC, w * 0.6); } }
+  L.multiplyScalar(dark); U.uFar.value *= far; wxGrip = grip; veh.gripMul = 1;
+  U.uHeadK.value = Math.max(U.uHeadK.value, (wx.fog + wx.dust) * 0.6);
+  const pm = dustFx.material.uniforms; pm.uAmt.value = wx.dust * 0.9; dustFx.visible = pm.uAmt.value > 0.02; dustFx.position.copy(camera.position);
 }
 // ---------- FUEL-style collectibles: fuel cans scattered by hash (1 per ~90 m cell, 15%), collected set in localStorage ----------
 const CAN_C = 90, cansGot = new Set(JSON.parse(localStorage.getItem('sinerally_cans') || '[]'));
@@ -384,8 +384,8 @@ function updateCans(force) { const px = veh.p.x, pz = veh.p.z; if (!force && Mat
 function tickCans(t) {
   updateCans(false); const p = veh.p;
   for (let k = cans.length - 1; k >= 0; k--) { const c = cans[k]; if (Math.hypot(p.x - c.x, p.z - c.z) < 4 && Math.abs(p.y - c.y - 1) < 4.5) {
-    cansGot.add(c.key); localStorage.setItem('sinerally_cans', JSON.stringify([...cansGot])); cans.splice(k, 1); veh.boost = 1; fire('pickup', { total: cansGot.size });
-    msg('FUEL +1  (' + cansGot.size + ')'); for (let q = 0; q < 16; q++) { const a = q / 16 * 6.28; emit(c.x, c.y + 1.5, c.z, Math.cos(a) * 5, 3, Math.sin(a) * 5, 1.1, 0.6, [1, 0.85, 0.2]); } } }
+    cansGot.add(c.key); localStorage.setItem('sinerally_cans', JSON.stringify([...cansGot])); cans.splice(k, 1); veh.nitro = 1; fire('pickup', { total: cansGot.size });
+    msg('FUEL +1  (' + cansGot.size + ')'); for (let q = 0; q < 16; q++) { const a = q / 16 * 6.28; puff(c.x, c.y + 1.5, c.z, Math.cos(a) * 5, 3, Math.sin(a) * 5, 1.1, 0.6, [1, 0.85, 0.2]); } } }
   canMesh.count = cans.length;
   cans.forEach((c, k) => { Qt.setFromEuler(Et.set(0, t * 2 + c.x, 0.15)); Mx.compose(Vt.set(c.x, c.y + 0.9 + 0.3 * Math.sin(t * 3 + c.z), c.z), Qt, St.set(1.8, 1.8, 1.8)); canMesh.setMatrixAt(k, Mx); });
   canMesh.instanceMatrix.needsUpdate = true; $('cans').textContent = '⛽ ' + cansGot.size;
@@ -451,123 +451,143 @@ function drawMap() {
     c.fillStyle = f ? '#ffd23c' : '#fff8'; c.strokeStyle = '#111'; c.lineWidth = 3; c.beginPath(); c.moveTo(x, y - r); c.lineTo(x + r, y); c.lineTo(x, y + r); c.lineTo(x - r, y); c.closePath(); c.fill(); c.stroke();
     c.lineWidth = 4; c.strokeText(f ? v.name : '?', x, y - r - 5); c.fillStyle = '#fff'; c.fillText(f ? v.name : '?', x, y - r - 5); }
   if (wp) { const x = P.X(wp.x), y = P.Y(wp.z), r = 10 * Math.min(2, devicePixelRatio); c.fillStyle = '#e8453c'; c.strokeStyle = '#111'; c.lineWidth = 3; c.beginPath(); c.arc(x, y, r, 0, 7); c.fill(); c.stroke(); c.fillStyle = '#fff'; c.beginPath(); c.arc(x, y, r * 0.4, 0, 7); c.fill(); }
-  { const x = P.X(veh.p.x), y = P.Y(veh.p.z), yw = veh.yaw, r = 14 * Math.min(2, devicePixelRatio); c.save(); c.translate(x, y); c.rotate(-yw); c.fillStyle = '#ff6a1a'; c.strokeStyle = '#111'; c.lineWidth = 3;
+  { const x = P.X(veh.p.x), y = P.Y(veh.p.z), yw = PH.yawOf(veh), r = 14 * Math.min(2, devicePixelRatio); c.save(); c.translate(x, y); c.rotate(-yw); c.fillStyle = '#ff6a1a'; c.strokeStyle = '#111'; c.lineWidth = 3;
     c.beginPath(); c.moveTo(0, -r); c.lineTo(-r * 0.7, r * 0.7); c.lineTo(0, r * 0.35); c.lineTo(r * 0.7, r * 0.7); c.closePath(); c.fill(); c.stroke(); c.restore(); }
   $('mInfo').textContent = `${(mapSpan / 1000).toFixed(1)} km · vistas ${Object.keys(vFound).length} · fuel ${cansGot.size}`;
 }
 mcv.addEventListener('click', e => { const P = mapProject(), dpr = mcv.width / innerWidth, x = e.clientX * dpr, y = e.clientY * dpr;
   setWp({ x: mapC[0] - (x - P.Wp / 2) / P.S, z: mapC[1] - (y - P.Hp / 2) / P.S }); });
-// ---------- menu (☰): vehicle, assists, time, weather, graphics ----------
+// ---------- menu (☰): vehicle selector (3D preview), attachments, assists, time, weather, graphics, garage actions ----------
+let selector = null;
 function buildMenu() {
-  const rows = [['VEHICLE', ['buggy', 'truck', 'quad'], () => vName, setVehicle],
-    ['STABILITY ASSIST', ['On', 'Off'], () => veh.assist.stab ? 'On' : 'Off', v => { veh.assist.stab = v === 'On'; localStorage.setItem('sinerally_stab', veh.assist.stab ? '1' : '0'); }],
-    ['TRACTION CONTROL', ['On', 'Off'], () => veh.assist.tc ? 'On' : 'Off', v => { veh.assist.tc = v === 'On'; localStorage.setItem('sinerally_tc', veh.assist.tc ? '1' : '0'); }],
-    ['TIME OF DAY', ['Auto', 'Day', 'Sunset', 'Night'], () => timeMode, v => { timeMode = v; localStorage.setItem('sinerally_time', v); }],
-    ['WEATHER', ['Auto', 'clear', 'rain', 'fog', 'dust'], () => wxMode, v => { wxMode = v; localStorage.setItem('sinerally_wx', v); }],
+  const rows = [
+    ['STABILITY ASSIST', ['On', 'Off'], () => assist.stab ? 'On' : 'Off', v => { assist.stab = veh.assist.stab = v === 'On'; localStorage.setItem('sinerally_stab', assist.stab ? '1' : '0'); }],
+    ['TRACTION CONTROL', ['On', 'Off'], () => assist.tc ? 'On' : 'Off', v => { assist.tc = veh.assist.tc = v === 'On'; localStorage.setItem('sinerally_tc', assist.tc ? '1' : '0'); }],
+    ['TIME OF DAY', ['Auto', 'Day', 'Sunset', 'Night'], () => timeMode, v => { timeMode = v; localStorage.setItem('sinerally_time', v); applyTime(); }],
+    ['WEATHER', WX_MODES, () => wxMode, v => { wxMode = v; localStorage.setItem('sinerally_wx', v); applyWx(); }],
     ['GRAPHICS', ['Low', 'Med', 'High'], () => qName, setQual]];
   const el = $('mRows'); el.innerHTML = '';
   for (const [label, opts, get, set] of rows) { const r = document.createElement('div'); r.className = 'mrow'; r.innerHTML = `<span>${label}</span>`;
     for (const o of opts) { const b = document.createElement('button'); b.className = 'sb' + (get() === o ? ' sel' : ''); b.textContent = o.toUpperCase(); b.onclick = () => { set(o); buildMenu(); }; r.appendChild(b); } el.appendChild(r); }
+  const g = document.createElement('div'); g.className = 'mrow'; g.innerHTML = '<span>GARAGE</span>';
+  const act = (t, f) => { const b = document.createElement('button'); b.className = 'sb'; b.textContent = t; b.onclick = () => { f(); buildMenu(); }; g.appendChild(b); };
+  act('REPAIR', () => { PH.repair(veh); msg('REPAIRED'); });
+  if (veh.cargo.capacity > 0) act('UNLOAD LOGS (' + veh.cargo.logs + ')', () => rig.unload());
+  act('REGROW TREES', () => { T.resetTrees(); hpMap.clear(); msg('TREES REGROWN'); });
+  act('PUT OUT FIRES', () => { T.extinguishAll(); });
+  el.appendChild(g);
+  const info = document.createElement('div'); info.className = 'mrow'; info.innerHTML = `<span>CAR</span><small style="font:bold 11px Arial">damage ${veh.damage.toFixed(0)}% · engine ${veh.heat.temp.toFixed(0)}°C${veh.cargo.capacity ? ` · logs ${veh.cargo.logs}/${veh.cargo.capacity}` : ''}</small>`; el.appendChild(info);
 }
-function openMenu(o) { $('menu').style.display = o ? 'block' : 'none'; if (o) { buildMenu(); audio.buildMenu($('mSnd')); } else sndBtn(); }
-$('tMenu').onclick = () => openMenu($('menu').style.display !== 'block'); $('mnClose').onclick = () => openMenu(false);
+function vehRow() { // VEHICLE: the physics module's selector (second small WebGL canvas, closed with the menu) + ATTACHMENTS picker
+  const mv = $('mVeh'); mv.style.display = 'block'; if (selector) selector.close();
+  mv.innerHTML = ''; const h = document.createElement('div'); h.className = 'mrow'; h.innerHTML = '<span>VEHICLE</span>'; mv.appendChild(h); const box = document.createElement('div'); mv.appendChild(box);
+  const small = innerHeight < 500; selector = openSelector({ THREE, container: box, current: vDef.id, size: small ? [200, 113] : [240, 136], onPick: id => { setVehicle(id); attRow(); buildMenu(); } });
+  attRow();
+}
+function attRow() { const ma = $('mAtt'); ma.innerHTML = '<div class="mrow"><span>ATTACHMENTS · ' + vDef.name + '</span></div>'; const c = document.createElement('div'); ma.appendChild(c);
+  renderPicker({ container: c, vehicle: vDef, selected: rig.attach, onChange: ids => { setAttachments(ids); buildMenu(); } }); }
+let menuOpen = false;
+function openMenu(o) { menuOpen = o; $('menu').style.display = o ? 'block' : 'none';
+  if (o) { buildMenu(); vehRow(); audio.buildMenu($('mSnd')); } else { if (selector) { selector.close(); selector = null; } $('mVeh').style.display = 'none'; sndBtn(); } }
+$('tMenu').onclick = () => openMenu(!menuOpen); $('mnClose').onclick = () => openMenu(false);
 $('mini').addEventListener('click', () => openMap(true)); $('mClose').onclick = () => openMap(false); $('mClr').onclick = () => setWp(null);
 $('mZin').onclick = () => { mapSpan = Math.max(1500, mapSpan / 2); openMap(true); }; $('mZout').onclick = () => { mapSpan = Math.min(20000, mapSpan * 2); openMap(true); };
-addEventListener('keydown', e => { if (e.code === 'KeyM' || e.code === 'Tab') { openMap(!mapOpen); e.preventDefault(); } if (e.code === 'Escape') { openMap(false); openMenu(false); } if (e.code === 'KeyV') setVehicle(vName === 'buggy' ? 'truck' : vName === 'truck' ? 'quad' : 'buggy'); });
-// ---------- telemetry + event hooks for a later audio module (read-only; see MERGE_NOTES.md) ----------
-const listeners = {}; function fire(type, data) { (listeners[type] || []).forEach(f => { try { f(data); } catch (e) { console.warn(e); } }); }
+addEventListener('keydown', e => { if (e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+  if (e.code === 'KeyM' || e.code === 'Tab') { openMap(!mapOpen); e.preventDefault(); } if (e.code === 'Escape') { openMap(false); openMenu(false); editor.close(); }
+  if (e.code === 'KeyV') { const l = listVehicles(), i = l.findIndex(v => v.id === vDef.id); setVehicle(l[(i + 1) % l.length].id); } if (e.code === 'KeyU') rig.unload(); });
+// ---------- telemetry + event hooks (read-only window.SR; see PLUGIN_API.md / MERGE_NOTES.md) ----------
 const TEL = { rpm: 0, idle: 0, redline: 0, throttle: 0, brake: 0, boost: false, nitro: 1, gear: 1, gears: 6, shifting: false, load: 0, speed: 0, fwdSpeed: 0, grounded: 0, air: 0,
-  surface: 'grass', wheels: [0, 1, 2, 3].map(() => ({ contact: false, surface: 'grass', slipRatio: 0, slipAngle: 0, load: 0 })), vehicle: 'buggy', soundPreset: 'boxer4', paused: false };
-function updateTelemetry(boosting) {
-  const t = TEL, c = veh.c; t.rpm = veh.rpm; t.idle = c.idle; t.redline = c.redline; t.throttle = veh.thr || 0; t.brake = veh.brk || 0; t.boost = boosting; t.nitro = veh.boost;
-  t.gear = veh.gear; t.gears = c.gears.length; t.shifting = veh.shift > 0; t.load = veh.load || 0; t.speed = veh.v.length(); t.fwdSpeed = veh.v.dot(veh.fwd); t.grounded = veh.grounded; t.air = veh.air;
-  t.surface = W.SURF_NAMES[veh.wheels[2].surf]; t.vehicle = vName; t.soundPreset = c.soundPreset; t.paused = mapOpen;
-  veh.wheels.forEach((wh, i) => { const o = t.wheels[i]; o.contact = wh.contact; o.surface = W.SURF_NAMES[wh.surf]; o.slipRatio = wh.sl; o.slipAngle = wh.sa; o.load = wh.load; });
+  surface: 'grass', wheels: [0, 1, 2, 3].map(() => ({ contact: false, surface: 'grass', slipRatio: 0, slipAngle: 0, load: 0 })), vehicle: 'buggy', vehiclePreset: '', soundPreset: '', engineTemp: 70,
+  temp: 70, overheat: false, limiter: false, damage: 0, mass: 0, logs: 0, capacity: 0, paused: false };
+function updateTelemetry() {
+  PH.telemetry(veh, TEL); TEL.gears = veh.P.gears.length; TEL.vehicle = vDef.id; TEL.soundPreset = TEL.vehiclePreset = vDef.sound || ''; TEL.engineTemp = veh.heat.temp; TEL.paused = mapOpen;
 }
 const roProxy = o => new Proxy(o, { set() { return false; }, get(t, k) { const v = t[k]; return v && typeof v === 'object' ? roProxy(v) : v; } });
 window.SR = Object.freeze({ telemetry: roProxy(TEL), on(type, fn) { (listeners[type] || (listeners[type] = [])).push(fn); }, off(type, fn) { const l = listeners[type]; if (l) l.splice(l.indexOf(fn) >>> 0, 1); } });
 // engine sound: the host only reads window.SR (telemetry + events), the plugin only sees the API v1 telemetry
 const audio = createEngineAudio({ sr: window.SR });
+// optional engine sound editor (☰ → ENGINE SOUND → EDIT): only shown when the active plugin has setConfig/getConfig
+const editor = createSoundEditor({ audio, onOpenChange: o => { if (o) openMenu(false); } });
+const editorOpen = () => editor.open;
 const sndBtn = () => { $('tSnd').textContent = audio.muted ? '🔇' : '🔊'; };
 $('tSnd').onclick = () => { if (!audio.running) { audio.unlock(); audio.setMuted(false); } else audio.setMuted(!audio.muted); sndBtn(); }; sndBtn(); // first tap = enable sound
 
 // ---------- loop ----------
 const camPos = new THREE.Vector3(veh.p.x, veh.p.y + 6, veh.p.z - 12), look = new THREE.Vector3(), camDir = new THREE.Vector3(0, 0, 1);
-const tv = new THREE.Vector3(), tq = new THREE.Quaternion(), tq2 = new THREE.Quaternion(), AX = new THREE.Vector3(1, 0, 0), AY = new THREE.Vector3(0, 1, 0), RV = new THREE.Vector3();
+const tv = new THREE.Vector3(), RV = new THREE.Vector3(), camTrees = []; let camBack = 8, camLow = 0;
 let last = performance.now(), acc = 0, fpsT = 0, frames = 0, fps = 0, shake = 0, tFrame = 0;
 const STEP = 1 / 120, stats = { fps: 0, physMs: 0, frameMs: 0, minFps: 999 };
-function updateWorld(force) {
-  const px = veh.p.x, pz = veh.p.z;
-  far.update(px, pz, force); near.update(px, pz, force);
-  uNear.value.set((near.gi0 + NEAR_N / 2) * NEAR_S, (near.gj0 + NEAR_N / 2) * NEAR_S, NEAR_N * NEAR_S / 2);
-  roads.update(px, pz, force); updateScenery(px, pz);
-}
+const focus = { x: 0, y: 0, z: 0 };
+function updateWorld(force) { updateScenery(veh.p.x, veh.p.z); if (force) scx = 1e9, updateScenery(veh.p.x, veh.p.z); }
 applyQuality(); updateWorld(true);
 function frame(now) {
-  requestAnimationFrame(frame); const t0 = performance.now(); let dt = Math.min(0.1, (now - last) / 1000); last = now; tFrame += dt; U.uTime.value = tFrame; renderer.info.reset();
+  requestAnimationFrame(frame); const t0 = performance.now(); let dt = Math.min(0.1, (now - last) / 1000); last = now; tFrame += dt; renderer.info.reset();
   dynRes(dt);
   if (mapOpen) { drawMap(); audio.frame(dt, true); last = now; return; } // world map pauses the game
   readInput(dt);
+  if (editor.open) { inp.gas = inp.brake = inp.boost = 0; inp.steer = 0; inp.hand = 1; } // sound editor open: car input paused (audio keeps running)
   acc += dt; let steps = 0; const tp = performance.now();
-  while (acc >= STEP && steps < 12) { simT += STEP; veh.step(STEP, inp); veh.collideCircles(colliders); checkBreak(); acc -= STEP; steps++; }
+  while (acc >= STEP && steps < 12) { simT += STEP; rig.step(inp, STEP); collideRocks(veh); acc -= STEP; steps++; }
   if (steps === 12) acc = 0;
   stats.physMs = performance.now() - tp;
-  for (const e of veh.events.splice(0)) {
-    if (e[0] === 'land') { shake = Math.min(1, e[1] / 14); if (e[2] > 1) msg('AIR ' + e[2].toFixed(1) + 's!');
-      if (e[1] > 4) { const s = veh.wheels[2].surf; for (let k = 0; k < 14; k++) { const a = k / 14 * 6.28; emit(veh.p.x + Math.cos(a) * 1.6, veh.p.y - 0.7, veh.p.z + Math.sin(a) * 1.6, Math.cos(a) * 7, 0.8, Math.sin(a) * 7, 1.6, 0.7, PUFFC[s]); } } }
-    else if (e[0] === 'crash') shake = Math.min(1, e[1] / 12); else if (e[0] === 'recover') msg('RECOVERED');
-    fire(e[0], { value: e[1], extra: e[2] });
-  }
-  for (const [x, z, m] of smashes.splice(0)) { // breakable hit: instant despawn + a burst of leaves/splinters
-    const gy = ground(x, z), col = m <= 3 ? [0.35, 0.62, 0.25] : m === 6 ? [0.42, 0.62, 0.3] : [0.62, 0.55, 0.32], n = m <= 2 ? 14 : 8;
-    for (let k = 0; k < n; k++) { const a = Math.random() * 6.28; emit(x + Math.cos(a), gy + 1 + Math.random() * (m <= 2 ? 5 : 1.5), z + Math.sin(a), Math.cos(a) * 4 + veh.v.x * 0.3, 2 + Math.random() * 3, Math.sin(a) * 4 + veh.v.z * 0.3, 1 + Math.random(), 0.8, k % 3 ? col : [0.5, 0.36, 0.22]); }
-    shake = Math.max(shake, m <= 2 ? 0.25 : 0.08); fire('smash', { kind: m <= 3 ? 'tree' : m === 6 ? 'cactus' : 'shrub', x, z });
-  }
-  atmosphere(dt); tickCans(tFrame); tickVistas();
-  U.uHeadP.value.copy(veh.p).addScaledVector(veh.fwd, 2).addScaledVector(veh.up, 0.8); U.uHeadD.value.copy(veh.fwd).addScaledVector(veh.up, -0.12).normalize();
-  precip.position.copy(camera.position);
-  updateWorld(false); raceUpdate(dt);
-  // car visuals: buggy body on the rigid body frame, wheels from the raycast suspension
-  car.position.copy(veh.p); car.quaternion.copy(veh.q); veh.basis();
-  const sp = veh.v.length(), boosting = !!inp.boost && veh.boost > 0;
-  for (let i = 0; i < 4; i++) { const wh = veh.wheels[i], m = wheelMeshes[i]; m.position.copy(wh.pos).addScaledVector(veh.up, VIS_UP);
-    tq.setFromAxisAngle(AY, wh.steer); tq2.setFromAxisAngle(AX, wh.rot); m.quaternion.copy(veh.q).multiply(tq).multiply(tq2);
+  tickCans(tFrame); tickVistas(); updateWorld(false); raceUpdate(dt);
+  U.uHeadP.value.set(veh.p.x, veh.p.y, veh.p.z).addScaledVector(veh.fwd, 2).addScaledVector(veh.up, 0.8); U.uHeadD.value.set(veh.fwd.x, veh.fwd.y, veh.fwd.z).addScaledVector(veh.up, -0.12).normalize();
+  // car visuals: vehicle model on the rigid-body frame, wheels from the raycast suspension, attachments on rig.root (child of the model group)
+  vis.group.position.set(veh.p.x, veh.p.y, veh.p.z); vis.group.quaternion.set(veh.q.x, veh.q.y, veh.q.z, veh.q.w);
+  const sp = Math.hypot(veh.v.x, veh.v.y, veh.v.z), boosting = veh.boosting, wr = veh.P.wheelR;
+  for (let i = 0; i < veh.wheels.length; i++) { const wh = veh.wheels[i]; vis.setWheel(i, wh.comp, wh.steer, wh.rot);
+    const si = surfIdx(wh.surf);
     if (wh.contact) {
-      const slip = Math.abs(wh.sl) > 0.15 || Math.abs(wh.sa) > 0.12, loose = [1, 3, 5, 6].includes(wh.surf);
+      const slip = Math.abs(wh.sl) > 0.15 || Math.abs(wh.sa) > 0.12, loose = si === 1 || si === 3 || si === 5 || si === 6;
       if ((loose && (slip || sp > 14) && Math.random() < 0.35 + Math.min(0.4, sp * 0.01)) || (slip && sp > 8 && Math.random() < 0.25))
-        emit(wh.pos.x, wh.pos.y - 0.2, wh.pos.z, -veh.v.x * 0.15 + (Math.random() - .5) * 3, 0.5 + Math.random() * 1.2, -veh.v.z * 0.15 + (Math.random() - .5) * 3,
-          0.6 + Math.random() * 0.7 + (slip ? 0.5 : 0), 0.45 + Math.random() * 0.35, PUFFC[wh.surf]);
+        puff(wh.pos.x, wh.pos.y - 0.2, wh.pos.z, -veh.v.x * 0.15 + (Math.random() - .5) * 3, 0.5 + Math.random() * 1.2, -veh.v.z * 0.15 + (Math.random() - .5) * 3,
+          0.6 + Math.random() * 0.7 + (slip ? 0.5 : 0), 0.45 + Math.random() * 0.35, PUFFC[si] || PUFFC[2]);
     }
-    if (i >= 2) { const on = wh.contact && wh.surf !== SURF.SNOW && (Math.abs(wh.sa) > 0.15 || Math.abs(wh.sl) > 0.2) && sp > 4;
-      const gy = wh.pos.y - veh.c.wheelR + (wh.surf === SURF.ASPHALT ? 0.2 : wh.surf === SURF.DIRT ? 0.12 : 0.05);
+    if (i >= 2 && i < 4) { const on = wh.contact && si !== 5 && (Math.abs(wh.sa) > 0.15 || Math.abs(wh.sl) > 0.2) && sp > 4;
+      const gy = wh.pos.y - wr + (si === 0 ? 0.2 : si === 1 ? 0.12 : 0.05);
       skid(i - 2, wh.pos.x, gy, wh.pos.z, veh.left.x, veh.left.z, on); }
   }
+  comicify(rig.root);
   updatePuffs(dt);
-  flame.visible = boosting; flame.scale.set(1, 1, 0.7 + Math.random() * 0.6);
-  { const gy = ground(veh.p.x, veh.p.z); shadow.position.set(veh.p.x, gy + 0.1, veh.p.z); shadow.rotation.y = veh.yaw; const sh = Math.max(0.3, 1 - (veh.p.y - 1.1 - gy) * 0.08); shadow.scale.set(sh * shadow.userData.w, 1, sh * shadow.userData.l); shadow.visible = veh.up.y > 0.3; }
+  vis.flame.visible = boosting; vis.flame.scale.set(1, 1, 0.7 + Math.random() * 0.6);
+  { const gy = T.heightAt(veh.p.x, veh.p.z); shadow.position.set(veh.p.x, gy + 0.1, veh.p.z); shadow.rotation.y = PH.yawOf(veh); const sh = Math.max(0.3, 1 - (veh.p.y - 1.1 - gy) * 0.08); shadow.scale.set(sh * shadow.userData.w, 1, sh * shadow.userData.l); shadow.visible = veh.up.y > 0.3; }
   // chase camera: follows velocity direction when moving fast, heading otherwise; FOV kick on boost
-  tv.set(veh.fwd.x, 0, veh.fwd.z); if (veh.v.dot(veh.fwd) < -3) tv.negate(); tv.normalize();
+  const dims = veh.P.dims || [2, 1.5, 4.4];
+  tv.set(veh.fwd.x, 0, veh.fwd.z); if (fwdSpeed() < -3) tv.negate(); tv.normalize();
   if (sp > 6 && veh.grounded) { RV.set(veh.v.x, 0, veh.v.z).normalize(); tv.lerp(RV, 0.35).normalize(); }
   camDir.lerp(tv, Math.min(1, (veh.grounded ? 4 : 1.2) * dt)).normalize();
-  const back = 8.5 + sp * 0.05, cx = veh.p.x - camDir.x * back, cz = veh.p.z - camDir.z * back;
-  const tgt = tv.set(cx, Math.max(veh.p.y + 3.2, ground(cx, cz) + 2), cz);
+  let back = 6.5 + dims[2] * 0.45 + sp * 0.05, low = 0;
+  { // don't park the chase camera inside a tree: shorten the boom in front of the nearest trunk/canopy on the camera ray
+    const ts = world.queryTrees(veh.p.x - camDir.x * back * 0.5, veh.p.z - camDir.z * back * 0.5, back * 0.5 + 3, camTrees);
+    for (const t of ts) { const dx = t.x - veh.p.x, dz = t.z - veh.p.z, tt = -(dx * camDir.x + dz * camDir.z), lat = Math.abs(dx * camDir.z - dz * camDir.x);
+      const tr = T.getTree(t.id), cr = tr ? Math.max(1.4, Math.min(3.2, tr.height * 0.26)) : 1.5;
+      if (tt > 0 && tt < back + cr && lat < cr) back = Math.min(back, Math.max(3.2, tt - cr * 0.8));
+      if (tt > -1 && tt < back + cr + 1.5 && lat < cr + 1.5) low = 1; } } // crowns around the boom: drop the camera below them (crowns start ~2.6 m up)
+  camBack += (back - camBack) * Math.min(1, (back < camBack ? 10 : 2) * dt); back = camBack; camLow += (low - camLow) * Math.min(1, 3 * dt);
+  const cx = veh.p.x - camDir.x * back, cz = veh.p.z - camDir.z * back;
+  const ch = 2.2 + dims[1] * 0.67, tgt = tv.set(cx, Math.max(veh.p.y + ch + (1.1 - ch) * camLow, T.heightAt(cx, cz) + 2 - 0.6 * camLow), cz);
   camPos.lerp(tgt, Math.min(1, 6 * dt)); camera.position.copy(camPos);
   if (shake > 0) { camera.position.x += (Math.random() - .5) * shake * 0.8; camera.position.y += (Math.random() - .5) * shake * 0.8; shake = Math.max(0, shake - dt * 2.5); }
   look.set(veh.p.x, veh.p.y + 1.3, veh.p.z); camera.lookAt(look);
   camera.fov += ((boosting ? 80 : 64 + Math.min(12, sp * 0.15)) - camera.fov) * Math.min(1, 3 * dt); camera.updateProjectionMatrix();
-  sky.position.copy(camera.position);
+  camera.updateMatrixWorld();
+  focus.x = veh.p.x; focus.y = veh.p.y; focus.z = veh.p.z;
+  T.update(dt, { camera, focus, viewHeight: rt.height }); atmosphere(dt); // terrain weather/sky/fire/trees, then the game's fog/dust overlay
   post.uniforms.uBoost.value += ((boosting ? 1 : 0) - post.uniforms.uBoost.value) * Math.min(1, 6 * dt);
-  grass.update(tFrame, veh.p.x + camDir.x * 18, veh.p.z + camDir.z * 18);
-  $('spd').textContent = Math.abs(Math.round(veh.v.dot(veh.fwd) * 3.6)); $('bar').style.width = (veh.boost * 100) + '%';
+  $('spd').textContent = Math.abs(Math.round(fwdSpeed() * 3.6)); $('bar').style.width = (veh.nitro * 100) + '%';
   $('air').textContent = veh.air > 0.5 ? 'AIR ' + veh.air.toFixed(1) + 's!' : '';
+  $('carinfo').textContent = (veh.damage >= 1 ? 'DMG ' + veh.damage.toFixed(0) + '%  ' : '') + (veh.cargo.capacity ? 'LOGS ' + veh.cargo.logs + '/' + veh.cargo.capacity : '');
   if (msgT > 0 && (msgT -= dt) <= 0) $('msg').textContent = '';
-  minimap(Math.atan2(camDir.x, camDir.z)); gauge(); tickWp(Math.atan2(camDir.x, camDir.z)); updateTelemetry(boosting); audio.frame(dt);
+  updateTelemetry(); minimap(Math.atan2(camDir.x, camDir.z)); gauge(); tickWp(Math.atan2(camDir.x, camDir.z)); updateLabels(dt); audio.frame(dt);
   if (!QS.has('nopost')) { renderer.setRenderTarget(rt); renderer.render(scene, camera); renderer.setRenderTarget(null); renderer.render(postScene, postCam); }
   else { renderer.setRenderTarget(null); renderer.render(scene, camera); }
   stats.frameMs = performance.now() - t0;
   frames++; fpsT += dt; if (fpsT > 0.5) { fps = stats.fps = frames / fpsT; window.__fps = fps; if (tFrame > 3) stats.minFps = Math.min(stats.minFps, fps); frames = 0; fpsT = 0;
-    if (dbg) { sample(veh.p.x, veh.p.z, SO); $('dbg').textContent = `${fps.toFixed(0)} fps  GFX ${qName}  cpu ${stats.frameMs.toFixed(1)}ms (phys ${stats.physMs.toFixed(1)})\ncalls ${renderer.info.render.calls} tris ${(renderer.info.render.triangles / 1000).toFixed(0)}k\n${veh.p.x.toFixed(0)},${veh.p.z.toFixed(0)} y${veh.p.y.toFixed(0)} ${W.REG_NAMES[SO.dom]}\ngear ${veh.gear} rpm ${veh.rpm.toFixed(0)} wheels ${veh.grounded}`; } }
+    if (dbg) { sample(veh.p.x, veh.p.z, SO); const ts = T.stats ? T.stats() : {}; $('dbg').textContent = `${fps.toFixed(0)} fps  GFX ${qName}  cpu ${stats.frameMs.toFixed(1)}ms (phys ${stats.physMs.toFixed(1)})\ncalls ${renderer.info.render.calls} tris ${(renderer.info.render.triangles / 1000).toFixed(0)}k\n${veh.p.x.toFixed(0)},${veh.p.z.toFixed(0)} y${veh.p.y.toFixed(0)} ${W.REG_NAMES[SO.dom]} · ${TS.biomeName || ''}\n${vDef.id} gear ${veh.gear} rpm ${veh.rpm.toFixed(0)} ${veh.heat.temp.toFixed(0)}°C wheels ${veh.grounded}${ts.fire && ts.fire.burning ? ' fire ' + ts.fire.burning : ''}`; } }
 }
 requestAnimationFrame(frame);
-window.__st = { veh, stats, inp, W, audio, get q() { return qName; }, setQ(q) { qName = q; applyQuality(); }, get x() { return veh.p.x; }, get z() { return veh.p.z; }, get y() { return veh.p.y; }, teleport(x, z, yaw = 0) { spawn(x, z, yaw); updateWorld(true); updateCans(true); },
-  gone, get brk() { return brk; }, setVehicle, get vName() { return vName; }, openMap, setWp, get wx() { return wx; }, set tod(v) { tod = v; timeMode = 'Fixed'; }, get dynS() { return dynS; } };
+window.__st = { get veh() { return veh; }, get state() { return veh; }, rig, T, PH, bus, world, hpMap, evLog, stats, inp, W, audio, editor, TEL, scene,
+  get q() { return qName; }, setQ(q) { qName = q; applyQuality(); }, get x() { return veh.p.x; }, get z() { return veh.p.z; }, get y() { return veh.p.y; },
+  teleport(x, z, yaw = 0) { spawn(x, z, yaw); updateWorld(true); updateCans(true); }, toBiome(name, yaw = 0) { const p = T.findBiome(name, veh.p.x, veh.p.z); if (p) this.teleport(p.x, p.z, yaw); return p; },
+  setVehicle, useVehicle, setAttachments, get vName() { return vDef.id; }, openMap, openMenu, setWp, get wx() { return wx; }, setWx(m, snap = true) { wxMode = m; applyWx(); if (snap) T.snapWeather(); }, set tod(v) { tod = v; timeMode = 'Fixed'; applyTime(); },
+  get dynS() { return dynS; }, get labels() { return labTrees; } };

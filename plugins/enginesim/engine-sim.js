@@ -36,11 +36,13 @@ export class EngineSim {
   // ---- lifecycle -------------------------------------------------------------------------
   /** Call synchronously inside a user gesture (tap/click/key). Creates/resumes the context (iOS unlock). */
   unlock() {
+    // iOS 16.4+: 'playback' puts Web Audio on the media channel so the Ring/Silent switch doesn't mute it.
+    // Set it inside the gesture, before the context is created/resumed.
+    try { if (navigator.audioSession && navigator.audioSession.type !== 'playback') navigator.audioSession.type = 'playback'; } catch (e) { }
     if (!this.ctx) {
       const AC = window.AudioContext || window.webkitAudioContext;
       try { this.ctx = new AC({ latencyHint: 'interactive' }); } catch (e) { this.ctx = new AC(); }
     }
-    try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { /* iOS 17+: ignore ringer switch */ }
     if (this.ctx.state !== 'running') { try { this.ctx.resume(); } catch (e) { } }
     try { // classic iOS unlock: play a 1-sample silent buffer inside the gesture
       const b = this.ctx.createBuffer(1, 1, 22050), s = this.ctx.createBufferSource();
