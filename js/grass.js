@@ -23,13 +23,14 @@ export function createGrass(scene, grid, { count = 12000, tile = 72 } = {}) {
   const mat = new THREE.ShaderMaterial({
     uniforms: {
       uTex: { value: grid.tex }, uN: { value: grid.n }, uStep: { value: grid.step }, uTile: { value: tile }, uCenter: { value: new THREE.Vector2() },
-      uTime: U.uTime, uSun: U.uSun, uHorizon: U.uHorizon, uPx: U.uPx, uHatch: U.uHatch, uFar: U.uFar,
+      ...U, // all shared comic uniforms (uLight/uAmb/uHeadK/... were missing before -> comic() lit the blades with uLight = 0 = black grass)
     },
     side: THREE.DoubleSide,
     vertexShader: /* glsl */`
       precision highp float; precision highp sampler2D;
       attribute vec4 off; uniform sampler2D uTex; uniform float uN, uStep, uTile, uTime; uniform vec2 uCenter;
-      varying vec3 vCol; varying float vY; varying vec3 vW;
+      uniform vec3 uSun; uniform float uAmb, uFar, uRain;
+      varying vec3 vCol; varying vec3 vW; varying float vFog;
       vec4 tx(float gi, float gj) { return texelFetch(uTex, ivec2(int(mod(gi, uN)), int(mod(gj, uN))), 0); }
       void main() {
         vec2 w = off.xy + uTile * floor((uCenter - off.xy) / uTile + 0.5);   // toroidal wrap around centre
@@ -48,18 +49,29 @@ export function createGrass(scene, grid, { count = 12000, tile = 72 } = {}) {
         p *= hgt; p.y *= 1.0;
         vec3 wp = vec3(w.x + p.x, s.x + p.y - 0.05, w.y + p.z);
         vec2 gn = floor(g + 0.5); vec4 cn = tx(gn.x, gn.y); float pc = cn.z; vec3 base = vec3(floor(pc / 256.0), mod(pc, 256.0), cn.w) / 255.0; // packed colour: nearest texel (no interpolation)
-        vY = position.y; vW = wp;
-        vCol = base * (0.92 + 0.16 * off.z);
+        vW = wp;
+        // ENGINE-BUILD LOOK (sinerally-engine grass.js): smooth per-vertex root->tip gradient base*(0.62+0.55y), unlit, no cel bands.
+        // The engine rendered it sRGB-encoded next to toon-lit ground (~0.86 x albedo); re-expressed relative to this build's raw
+        // comic ground colour so blades keep the same contrast: roots a bit darker than the ground, tips ~20% lighter and yellower.
+        vec3 al = base / vec3(0.9, 1.08, 0.85);                                        // ground albedo (undo the packing tint)
+        vec3 lin = base * (0.62 + 0.55 * position.y) * (0.92 + 0.16 * off.z);           // engine's vCol
+        vec3 k = pow(max(lin / max(al * 0.86, vec3(1e-3)), vec3(1e-3)), vec3(0.4545));   // engine grass/ground ratio, display space
+        float l = uSun.y * 0.5 + 0.5, band = l > 0.62 ? 1.04 : (l > 0.42 ? 0.74 : 0.5);     // flat-ground cel band (dusk/night follow the ground)
+        vec3 pa = pow(al, vec3(0.85)); pa = mix(vec3(dot(pa, vec3(.299,.587,.114))), pa, 0.9) * vec3(0.94, 1.0, 0.96); // engine's softer, slightly greener blade tint
+        vec3 gc = pa * k * band;                                                          // smooth root->tip gradient (no cel steps)
+        gc = mix(gc, gc * vec3(0.62, 0.70, 1.25), smoothstep(1.0, 0.5, band) * 0.75);
+        gc += al * 0.10 * uAmb;                                                          // sky fill like flat ground
+        vCol = gc * (1.0 - 0.28 * uRain);                                                // wet blades darker in rain
         vec4 mv = modelViewMatrix * vec4(wp, 1.0);
+        float fd = -mv.z; vFog = smoothstep(uFar * 0.2, uFar, fd); vFog *= vFog * 0.95;
         gl_Position = projectionMatrix * mv;
       }`,
     fragmentShader: COMIC + /* glsl */`
-      varying vec3 vCol; varying float vY; varying vec3 vW;
+      varying vec3 vCol; varying vec3 vW; varying float vFog;
       void main() {
-        // comic grass: 3 hard tone steps root->tip (dark ink-ish roots, bright tips), lit like flat ground, no hatching
-        float t = vY < 0.33 ? 0.74 : (vY < 0.72 ? 0.9 : 1.1);
-        vec3 c = comic(vCol * t, vec3(0., 1., 0.), vW, 0.0);
-        gl_FragColor = vec4(c, 0.); // alpha 0 = grass code: post pass suppresses per-blade ink
+        // engine-style grass: smooth gradient, no hatching/cel bands; follows day/night/weather light and headlights
+        vec3 c = vCol * uLight + uHeadK * headLight(vCol, vec3(0., 1., 0.), vW);
+        gl_FragColor = vec4(mix(c, uHorizon, vFog), 0.); // alpha 0 = grass code: post pass skips per-blade ink and posterize/halftone
       }`,
   });
   const mesh = new THREE.Mesh(geo, mat); mesh.frustumCulled = false; scene.add(mesh);
