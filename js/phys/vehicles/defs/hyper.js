@@ -2,7 +2,7 @@
 export default {
   id: 'hyper', name: 'SINE GT', blurb: 'Mid-engined hypercar. 300+ km/h with nitro: zoom through trees.', sound: 'v12-hyper',
   stats: { top: 293, topNitro: 330, accel: 5, grip: 4, weight: 2 },
-  physics: { mass: 1250, dims: [2.0, 1.15, 4.6], inertiaScale: 1.15, wheelR: 0.36, rest: 0.34, k: 62000, cBump: 4200, cReb: 6000, arbF: 22000, arbR: 16000,
+  physics: { vtop: 81.47, vtopBoost: 1.164, arcade: { vtop: 82.21, grip: 1.4, latG: 1.6, yawMax: 2.1, yawK: 8, align: 3.0, down: 0.0035, driftAngle: 0.5, driftTurn: 1.05 }, mass: 1250, dims: [2.0, 1.15, 4.6], inertiaScale: 1.15, wheelR: 0.36, rest: 0.34, k: 62000, cBump: 4200, cReb: 6000, arbF: 22000, arbR: 16000,
     wheelI: 1.3, hard: [[0.92, -0.02, 1.45], [-0.92, -0.02, 1.45], [0.92, -0.02, -1.4], [-0.92, -0.02, -1.4]], forceLift: 0.5,
     torque: [[0, 380], [1500, 470], [3000, 620], [5000, 720], [7000, 700], [8500, 600], [9000, 480]], idle: 1000, redline: 8800,
     gears: [3.0, 2.1, 1.6, 1.28, 1.05, 0.88, 0.76], final: 3.3, up: 8200, down: 4200, shiftT: 0.12, split: 0.35, eff: 0.88,

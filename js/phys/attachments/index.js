@@ -1,5 +1,5 @@
 // ATTACHMENTS MODULE. Contract (MODULE_API.md):
-//   attachment = { id, name, blurb, mounts: ['front'|'roof'|'rear'], mods?: {mass, capacity, cdA, coolMul}, create(vehicle, host) -> instance }
+//   attachment = { id, name, blurb, mounts: ['front'|'roof'|'rear'], mods?: {mass, capacity, cdA, coolMul, topMul, reach}, melts?, create(vehicle, host) -> instance }
 //   instance   = { update(dt), onCollision(contact), dispose(), object? }
 //   host       = { THREE, state, mount(name) -> Object3D, emit(type, data), damageTree(tree, hp, cause) -> remaining, treeHp(tree), addLogs(n) -> accepted }
 // One attachment per mount point. Static `mods` are summed by the host (applyMods) into physics state.mods / state.cargo.
@@ -20,9 +20,12 @@ export function validate(vehicle, ids) {
   for (const id of ids || []) { const a = REG.get(id); if (!a) continue; const m = a.mounts.find(m => vehicle.mounts[m] && !used.has(m)); if (!m) continue; used.add(m); out.push(id); }
   return out;
 }
-// sum static mods -> { mass, capacity, cdA, coolMul }
+// sum static mods -> { mass, capacity, cdA, coolMul, topMul, reach }
 export function applyMods(ids) {
-  const r = { mass: 0, capacity: 0, cdA: 0, coolMul: 1 };
-  for (const id of ids) { const m = (REG.get(id) || {}).mods || {}; r.mass += m.mass || 0; r.capacity += m.capacity || 0; r.cdA += m.cdA || 0; r.coolMul *= m.coolMul || 1; }
+  const r = { mass: 0, capacity: 0, cdA: 0, coolMul: 1, topMul: 1, reach: 0 };
+  for (const id of ids) { const m = (REG.get(id) || {}).mods || {}; r.mass += m.mass || 0; r.capacity += m.capacity || 0; r.cdA += m.cdA || 0; r.coolMul *= m.coolMul || 1;
+    r.topMul *= m.topMul || 1; r.reach = Math.max(r.reach, m.reach || 0); }
   return r;
 }
+// true when a mounted attachment destroys scenery on front contact (harvester): hosts use it for their own colliders (rocks)
+export const melts = ids => (ids || []).some(id => (REG.get(id) || {}).melts);

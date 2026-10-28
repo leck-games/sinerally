@@ -13,6 +13,7 @@ export function createRoads(scene, mk) { // mk(kind:'asphalt'|'dirt'|'bridge', t
     noise(g, '#45464b', 0.25);
     g.fillStyle = '#eee'; g.fillRect(3, 0, 3, 256); g.fillRect(58, 0, 3, 256);
     g.fillStyle = '#f2c230'; g.fillRect(30.5, 0, 3, 140);
+    g.fillStyle = 'rgba(238,238,238,0.85)'; g.fillRect(16, 0, 2, 90); g.fillRect(46, 0, 2, 90); // lane dashes: the 24 m highway reads as 2 lanes each way
   });
   const dirtTex = canvasTex(g => {
     noise(g, '#9a7652', 0.3, 1400);

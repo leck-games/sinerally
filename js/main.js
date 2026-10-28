@@ -17,6 +17,7 @@ import { buildVehicle } from './phys/vehicles/build.js';
 import { listVehicles, getVehicle, DEFAULT_VEHICLE } from './phys/vehicles/index.js';
 import { openSelector } from './phys/vehicles/selector.js';
 import { renderPicker } from './phys/attachments/picker.js';
+import { melts } from './phys/attachments/index.js';
 const { WATER, nearTrack, trackPoint, hash2, sample, surfaceOf, colourOf, normal, height, ground } = W;
 const $ = id => document.getElementById(id);
 const QS = new URLSearchParams(location.search);
@@ -117,25 +118,32 @@ function cellObj(ci, cj) {
   if (cellCache.size > 60000) cellCache.clear();
   cellCache.set(key, o); return o;
 }
-let scx = 1e9, scz = 1e9; const colliders = []; // solid rocks: x,z,r
+let scx = 1e9, scz = 1e9; const colliders = []; // solid rocks: x,z,r,key (r<0 = melted this scan)
+const rockGone = new Set(store.get('sinerally_rocks_gone', [])); // rocks melted by a harvester head stay gone (persisted; ☰ GARAGE → REGROW restores)
+function meltRock(key) { rockGone.add(key); if (rockGone.size > 4000) rockGone.delete(rockGone.values().next().value); store.set('sinerally_rocks_gone', [...rockGone]); scx = 1e9; }
 function updateScenery(px, pz) {
   const cx = Math.round(px / 28), cz = Math.round(pz / 28); if (cx === scx && cz === scz) return; scx = cx; scz = cz;
   rockM.forEach(m => m.count = 0); colliders.length = 0;
   const SR = QUAL[qName].sr, r = Math.ceil(SR / SC), ox = Math.floor(px / SC), oz = Math.floor(pz / SC);
   for (let i = -r; i <= r; i++) for (let j = -r; j <= r; j++) {
-    if (i * i + j * j > r * r) continue; const o = cellObj(ox + i, oz + j); if (!o) continue;
+    if (i * i + j * j > r * r) continue; const o = cellObj(ox + i, oz + j); if (!o || rockGone.has(o.key)) continue;
     const m = rockM[o.m]; if (m.count >= m.instanceMatrix.count) continue; const s = o.s, t = 0.85 + 0.25 * o.v, big = o.red ? 1.8 : 1;
     Qt.setFromEuler(Et.set(o.h * 9, o.h * 30, o.h * 3)); Mx.compose(Vt.set(o.x, o.y - 0.4, o.z), Qt, St.set(s * big, s * big * (o.red ? 1.3 : 1), s * big));
-    Cc.setRGB(o.red ? 1.35 * t : t, o.red ? 0.85 * t : t, o.red ? 0.62 * t : t * 0.97); colliders.push(o.x, o.z, 2.2 * s * big);
+    Cc.setRGB(o.red ? 1.35 * t : t, o.red ? 0.85 * t : t, o.red ? 0.62 * t : t * 0.97); colliders.push(o.x, o.z, 2.2 * s * big, o.key);
     const k = m.count++; m.setMatrixAt(k, Mx); m.setColorAt(k, Cc);
   }
   for (const m of rockM) { m.instanceMatrix.needsUpdate = true; m.instanceColor.needsUpdate = true; }
 }
 function collideRocks(s) { // circle push-out + bounce on the physics state (after each 120 Hz step)
-  const p = s.p, v = s.v, rr = (s.P.dims ? Math.max(s.P.dims[0], s.P.dims[2]) * 0.4 : 1.4);
-  for (let i = 0; i < colliders.length; i += 3) {
-    const dx = p.x - colliders[i], dz = p.z - colliders[i + 1], r = colliders[i + 2] + rr, d2 = dx * dx + dz * dz; if (d2 > r * r || d2 < 1e-6) continue;
+  const p = s.p, v = s.v, rr = (s.P.dims ? Math.max(s.P.dims[0], s.P.dims[2]) * 0.4 : 1.4), melt = melts(rig.attach);
+  const fl = Math.hypot(s.fwd.x, s.fwd.z) || 1, fx = s.fwd.x / fl, fz = s.fwd.z / fl, ext = melt ? 1.2 + Math.max(0, v.x * fx + v.z * fz) * STEP : 0;
+  for (let i = 0; i < colliders.length; i += 4) {
+    if (colliders[i + 2] < 0) continue;
+    const dx = p.x - colliders[i], dz = p.z - colliders[i + 1], r = colliders[i + 2] + rr + ext, d2 = dx * dx + dz * dz; if (d2 > r * r || d2 < 1e-6) continue;
     if (p.y - T.heightAt(colliders[i], colliders[i + 1]) > colliders[i + 2] * 1.4 + 1) continue;
+    if (melt) { const d = Math.sqrt(d2); if (-(dx * fx + dz * fz) / d > 0.35) { // rock ahead of the cutter: gone at once — no push, no speed loss, no damage, no FX
+      bus.emit('rock:melted', { key: colliders[i + 3], x: colliders[i], z: colliders[i + 1], r: colliders[i + 2], speed: Math.hypot(v.x, v.z) * 3.6 }); meltRock(colliders[i + 3]); colliders[i + 2] = -1; continue; }
+      if (d > r - ext) continue; } // the extra cutter reach only applies to the front
     const d = Math.sqrt(d2), nx = dx / d, nz = dz / d; p.x += nx * (r - d); p.z += nz * (r - d);
     const vn = v.x * nx + v.z * nz; if (vn < 0) { v.x -= 1.4 * vn * nx; v.z -= 1.4 * vn * nz; if (vn < -5) { bus.emit('crash', { value: -vn, cause: 'rock' }); PH.addDamage(s, -vn * 0.4, 'rock'); } }
   }
@@ -143,6 +151,8 @@ function collideRocks(s) { // circle push-out + bounce on the physics state (aft
 
 // ---------- vehicle (physics module rig) + visuals (vehicle module models, comic materials) ----------
 const rig = createRig({ THREE, world, emit: (t, d) => bus.emit(t, d) });
+// handling model (physics module): ARCADE (default, NFS-Carbon/Trackmania-style) or NORMAL (the previous model); ☰ HANDLING, HUD ARC/NRM, key H
+let hMode = ({ arcade: 'arcade', normal: 'normal' })[QS.get('handling') || localStorage.getItem('sinerally_handling') || store.get('srp_handling', 'arcade')] || 'arcade';
 const carMat = objMat({ hatch: 0.5 }), flameMat = objMat({ unlit: true });
 const carRoot = new THREE.Group(); scene.add(carRoot);
 const shadow = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), decalMat(0x203040, true)); scene.add(shadow);
@@ -172,7 +182,7 @@ function setVehicle(id) { if (id === vDef?.id) return; const x = veh.p.x, z = ve
 function setAttachments(ids) { rig.setAttachments(ids); comicify(rig.root); store.set('srp_attach_' + vDef.id, rig.attach); return rig.attach; }
 function spawn(x, z, yaw = 0) { for (let k = 0; k < 200 && height(x, z) < WATER + 2; k++) { x += 37; z += 23; } PH.spawn(veh, world, x, z, yaw); lastGear = veh.gear; }
 const fwdSpeed = () => veh.v.x * veh.fwd.x + veh.v.y * veh.fwd.y + veh.v.z * veh.fwd.z;
-{ let id = QS.get('car') || store.get('srp_vehicle', null) || localStorage.getItem('sinerally_veh') || DEFAULT_VEHICLE; if (!listVehicles().some(v => v.id === id)) id = DEFAULT_VEHICLE; useVehicle(id); }
+{ let id = QS.get('car') || store.get('srp_vehicle', null) || localStorage.getItem('sinerally_veh') || DEFAULT_VEHICLE; if (!listVehicles().some(v => v.id === id)) id = DEFAULT_VEHICLE; useVehicle(id); rig.setMode(hMode); }
 { const t = nearTrack(0, 0), p = trackPoint(t, 0), q = trackPoint(t, 0.02); spawn(p[0], p[1], Math.atan2(q[0] - p[0], q[1] - p[1])); }
 
 // ---------- dust puffs (comic, 1 draw call) ----------
@@ -227,9 +237,11 @@ function readInput(dt) {
   let s = (key.KeyA || key.ArrowLeft ? 1 : 0) - (key.KeyD || key.ArrowRight ? 1 : 0) - touch.steer - (tilt ? tiltSteer : 0);
   // touch/tilt: response curve (fine control around centre) + extra speed sensitivity; everything is smoothed
   let kb = (key.KeyA || key.ArrowLeft ? 1 : 0) - (key.KeyD || key.ArrowRight ? 1 : 0), tc = -touch.steer - (tilt ? tiltSteer : 0);
-  tc = Math.sign(tc) * Math.pow(Math.min(1, Math.abs(tc)), 1.5) / (1 + Math.abs(fwdSpeed()) * 0.012);
+  // ARCADE: the physics already scales steering with speed, so touch keeps a gentler curve + little extra damping and reacts faster (iPhone thumbs)
+  const arc = hMode === 'arcade', TS = arc ? { pw: 1.3, k: 0.004, sm: 16, kr: 7 } : { pw: 1.5, k: 0.012, sm: 12, kr: 5 };
+  tc = Math.sign(tc) * Math.pow(Math.min(1, Math.abs(tc)), TS.pw) / (1 + Math.abs(fwdSpeed()) * TS.k);
   const tgt = Math.max(-1, Math.min(1, kb + tc));
-  if (kb) steerSm += Math.max(-5 * dt, Math.min(5 * dt, tgt - steerSm)); else steerSm += (tgt - steerSm) * Math.min(1, 12 * dt);
+  if (kb) steerSm += Math.max(-TS.kr * dt, Math.min(TS.kr * dt, tgt - steerSm)); else steerSm += (tgt - steerSm) * Math.min(1, TS.sm * dt);
   inp.steer = Math.abs(steerSm) < 1e-3 ? 0 : steerSm; void s;
   inp.gas = key.KeyW || key.ArrowUp || touch.gas ? 1 : 0; inp.brake = key.KeyS || key.ArrowDown || touch.brk ? 1 : 0;
   inp.hand = key.Space || touch.drf ? 1 : 0; inp.boost = key.ShiftLeft || key.ShiftRight || touch.bst ? 1 : 0;
@@ -266,7 +278,7 @@ function minimap(yaw) {
   const Wd = 130, sc = 0.08, px = veh.p.x, pz = veh.p.z; mc.clearRect(0, 0, Wd, Wd); mc.save(); mc.beginPath(); mc.arc(Wd / 2, Wd / 2, Wd / 2, 0, 7); mc.clip(); mc.translate(Wd / 2, Wd / 2); mc.rotate(yaw + Math.PI); mc.lineCap = 'round';
   if (Math.hypot(px - mapAt[0], pz - mapAt[1]) > 150) { mapAt = [px, pz]; mapPaths = W.pathsNear(px, pz, 1100); }
   for (const pass of [0, 1]) for (const e of mapPaths) {
-    const hw = e.type === W.HWY ? 4 : e.type === W.LOOP ? 3.5 : 2;
+    const hw = e.type === W.HWY ? 7 : e.type === W.LOOP ? 5 : 3;
     mc.strokeStyle = pass === 0 ? '#111' : e.type === W.HWY ? '#5a5c66' : e.type === W.LOOP ? '#e8a860' : '#c8955a'; mc.lineWidth = pass === 0 ? hw + 3 : hw; mc.beginPath();
     const n = e.loop ? 64 : 16; for (let i = 0; i <= n; i++) { W.pathPoint(e, i / n, false); const x = (W.PP.x - px) * sc, y = (W.PP.z - pz) * sc; i ? mc.lineTo(x, y) : mc.moveTo(x, y); } mc.stroke();
   }
@@ -297,8 +309,9 @@ function gauge() {
   lbl((veh.rpm / 1000).toFixed(1) + 'K RPM', cx - 56, cy + 12); lbl(String(TEL.surface || '').toUpperCase(), cx + 56, cy + 12);
   // temperature: small inked bar under the gear (blue -> yellow -> red), HOT / OVERHEAT tag
   const H = P.heat, tk = Math.max(0, Math.min(1, (veh.heat.temp - H.ambient) / (H.max - H.ambient))), hot = veh.heat.temp >= H.hot;
-  const bx = cx - 30, by = cy - 6, bw = 60; gc.fillStyle = '#111'; gc.fillRect(bx - 2, by - 2, bw + 4, 9);
-  gc.fillStyle = veh.heat.temp >= H.overheat ? '#ff3a1a' : hot ? '#ffb020' : '#4fb8ff'; gc.fillRect(bx, by, bw * tk, 5);
+  const warm = veh.heat.temp >= H.ambient + 0.6 * (H.hot - H.ambient); TEL.tempShown = warm; // auto-hide: the bar only appears once the engine is warm
+  if (warm) { const bx = cx - 30, by = cy - 6, bw = 60; gc.fillStyle = '#111'; gc.fillRect(bx - 2, by - 2, bw + 4, 9);
+  gc.fillStyle = veh.heat.temp >= H.overheat ? '#ff3a1a' : hot ? '#ffb020' : '#4fb8ff'; gc.fillRect(bx, by, bw * tk, 5); }
   if (hot) ink(veh.heat.cut ? 'ENGINE CUT' : veh.heat.over ? 'OVERHEAT' : 'HOT', cx, 16, 'italic 900 13px "Arial Black",system-ui', 3, veh.heat.over ? '#ff5030' : '#ffd23c');
 }
 
@@ -310,7 +323,7 @@ function project(x, y, z) { pv.set(x, y, z).project(camera); if (pv.z > 1 || pv.
 let labT = 0, labTrees = [];
 function updateLabels(dt) {
   labT -= dt; const now = performance.now();
-  if (labT <= 0) { labT = 0.12; const all = world.queryTrees(veh.p.x, veh.p.z, 32); for (const t of all) t.d = Math.hypot(t.x - veh.p.x, t.z - veh.p.z);
+  if (labT <= 0) { labT = 0.12; const all = world.queryTrees(veh.p.x, veh.p.z, 32); for (const t of all) { t.d = Math.hypot(t.x - veh.p.x, t.z - veh.p.z); if (hpMap.has(t.id)) t.hp = hpMap.get(t.id); }
     all.sort((a, b) => ((b.hp < 3 || recentHit.has(b.id)) - (a.hp < 3 || recentHit.has(a.id))) || a.d - b.d); let full = 0; labTrees = all.filter(t => t.hp < 3 || recentHit.has(t.id) || (t.d < 14 && full++ < 3)).slice(0, MAXLAB); } // damaged/hit trees + the 3 nearest intact ones
   for (let i = 0; i < MAXLAB; i++) { const d = hpLabs[i], t = labTrees[i]; let sp = null;
     if (t) { const tr = T.getTree(t.id); if (!tr) { d.style.display = 'none'; continue; } t.hp = hpMap.has(t.id) ? hpMap.get(t.id) : tr.hp; sp = project(t.x, tr.pos.y + Math.min(tr.height, 6) * 0.55 + 1, t.z); }
@@ -332,7 +345,7 @@ bus.on('engine:overheat', d => { const p = d.position; T.engineOverheat({ positi
 bus.on('engine:cooled', () => msg('ENGINE COOLED'));
 bus.on('tree:damage', d => { recentHit.set(d.id, performance.now() + 1600); labT = 0; const y = T.heightAt(d.x, d.z);
   if (d.cause !== 'harvest') { popText('-' + d.hp.toFixed(1) + ' HP', d.x, y + 4, d.z); burst(d.x, y, d.z, 6, [0.35, 0.62, 0.25]); shake = Math.max(shake, 0.15); } });
-bus.on('tree:destroyed', d => { const y = T.heightAt(d.x, d.z); popText(d.cause === 'harvest' ? 'TIMBER!' : 'SMASH!', d.x, y + 5, d.z, '#ffd23c'); burst(d.x, y, d.z, 14, [0.35, 0.62, 0.25], 5); shake = Math.max(shake, 0.25); });
+bus.on('tree:destroyed', d => { if (d.cause === 'harvest') return; const y = T.heightAt(d.x, d.z); popText('SMASH!', d.x, y + 5, d.z, '#ffd23c'); burst(d.x, y, d.z, 14, [0.35, 0.62, 0.25], 5); shake = Math.max(shake, 0.25); });
 bus.on('harvester:log', d => popText('+' + d.logs + ' LOG', veh.p.x, veh.p.y + 2.5, veh.p.z, '#ffd23c'));
 bus.on('harvester:full', () => msg('LOG RACK FULL'));
 bus.on('cargo:unload', d => msg('UNLOADED ' + (d && d.logs != null ? d.logs + ' LOGS' : '')));
@@ -443,7 +456,7 @@ function drawMap() {
   const P = mapProject(), c = mx2; c.fillStyle = '#f7e6b5'; c.fillRect(0, 0, P.Wp, P.Hp); c.imageSmoothingEnabled = false;
   c.drawImage(mapImg, P.X(mapC[0] + mapSpan / 2), P.Y(mapC[1] + mapSpan / 2), mapSpan * P.S, mapSpan * P.S);
   c.lineCap = 'round'; c.lineJoin = 'round';
-  for (const pass of [0, 1]) for (const e of wmPaths) { const hw = (e.type === W.HWY ? 3 : e.type === W.LOOP ? 2.5 : 1.5) * Math.min(2, devicePixelRatio);
+  for (const pass of [0, 1]) for (const e of wmPaths) { const hw = (e.type === W.HWY ? 5.5 : e.type === W.LOOP ? 3.6 : 2.2) * Math.min(2, devicePixelRatio);
     c.strokeStyle = pass === 0 ? '#111' : e.type === W.HWY ? '#e8e4d8' : e.type === W.LOOP ? '#ff8a1a' : '#c8955a'; c.lineWidth = pass === 0 ? hw + 3 : hw; c.beginPath();
     const n = e.loop ? 48 : 12; for (let i = 0; i <= n; i++) { W.pathPoint(e, i / n, false); const x = P.X(W.PP.x), y = P.Y(W.PP.z); i ? c.lineTo(x, y) : c.moveTo(x, y); } c.stroke(); }
   const ci = Math.floor(mapC[0] / VC), cj = Math.floor(mapC[1] / VC), R = Math.ceil(mapSpan / VC / 2) + 1; c.font = `900 ${12 * Math.min(2, devicePixelRatio)}px "Arial Black",system-ui`; c.textAlign = 'center';
@@ -465,7 +478,9 @@ function buildMenu() {
     ['TRACTION CONTROL', ['On', 'Off'], () => assist.tc ? 'On' : 'Off', v => { assist.tc = veh.assist.tc = v === 'On'; localStorage.setItem('sinerally_tc', assist.tc ? '1' : '0'); }],
     ['TIME OF DAY', ['Auto', 'Day', 'Sunset', 'Night'], () => timeMode, v => { timeMode = v; localStorage.setItem('sinerally_time', v); applyTime(); }],
     ['WEATHER', WX_MODES, () => wxMode, v => { wxMode = v; localStorage.setItem('sinerally_wx', v); applyWx(); }],
-    ['GRAPHICS', ['Low', 'Med', 'High'], () => qName, setQual]];
+    ['GRAPHICS', ['Low', 'Med', 'High'], () => qName, setQual],
+    ['HANDLING', ['Arcade', 'Normal'], () => hMode === 'arcade' ? 'Arcade' : 'Normal', v => setHandling(v.toLowerCase())],
+    ['UI', ['Full', 'Minimal', 'None'], () => uiMode[0].toUpperCase() + uiMode.slice(1), v => setUi(v.toLowerCase())]];
   const el = $('mRows'); el.innerHTML = '';
   for (const [label, opts, get, set] of rows) { const r = document.createElement('div'); r.className = 'mrow'; r.innerHTML = `<span>${label}</span>`;
     for (const o of opts) { const b = document.createElement('button'); b.className = 'sb' + (get() === o ? ' sel' : ''); b.textContent = o.toUpperCase(); b.onclick = () => { set(o); buildMenu(); }; r.appendChild(b); } el.appendChild(r); }
@@ -473,7 +488,7 @@ function buildMenu() {
   const act = (t, f) => { const b = document.createElement('button'); b.className = 'sb'; b.textContent = t; b.onclick = () => { f(); buildMenu(); }; g.appendChild(b); };
   act('REPAIR', () => { PH.repair(veh); msg('REPAIRED'); });
   if (veh.cargo.capacity > 0) act('UNLOAD LOGS (' + veh.cargo.logs + ')', () => rig.unload());
-  act('REGROW TREES', () => { T.resetTrees(); hpMap.clear(); msg('TREES REGROWN'); });
+  act('REGROW TREES & ROCKS', () => { T.resetTrees(); hpMap.clear(); rockGone.clear(); store.set('sinerally_rocks_gone', []); scx = 1e9; msg('SCENERY REGROWN'); });
   act('PUT OUT FIRES', () => { T.extinguishAll(); });
   el.appendChild(g);
   const info = document.createElement('div'); info.className = 'mrow'; info.innerHTML = `<span>CAR</span><small style="font:bold 11px Arial">damage ${veh.damage.toFixed(0)}% · engine ${veh.heat.temp.toFixed(0)}°C${veh.cargo.capacity ? ` · logs ${veh.cargo.logs}/${veh.cargo.capacity}` : ''}</small>`; el.appendChild(info);
@@ -494,7 +509,16 @@ $('mini').addEventListener('click', () => openMap(true)); $('mClose').onclick = 
 $('mZin').onclick = () => { mapSpan = Math.max(1500, mapSpan / 2); openMap(true); }; $('mZout').onclick = () => { mapSpan = Math.min(20000, mapSpan * 2); openMap(true); };
 addEventListener('keydown', e => { if (e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
   if (e.code === 'KeyM' || e.code === 'Tab') { openMap(!mapOpen); e.preventDefault(); } if (e.code === 'Escape') { openMap(false); openMenu(false); editor.close(); }
-  if (e.code === 'KeyV') { const l = listVehicles(), i = l.findIndex(v => v.id === vDef.id); setVehicle(l[(i + 1) % l.length].id); } if (e.code === 'KeyU') rig.unload(); });
+  if (e.code === 'KeyV') { const l = listVehicles(), i = l.findIndex(v => v.id === vDef.id); setVehicle(l[(i + 1) % l.length].id); } if (e.code === 'KeyU') rig.unload(); if (e.code === 'KeyH') setHandling(hMode === 'arcade' ? 'normal' : 'arcade'); if (e.code === 'KeyI') cycleUi(); });
+// ---------- HUD toggles: handling ARC/NRM, UI hide (FULL → MINIMAL → NONE), unload (only with logs) ----------
+function setHandling(m) { hMode = m === 'normal' ? 'normal' : 'arcade'; rig.setMode(hMode); localStorage.setItem('sinerally_handling', hMode); store.set('srp_handling', hMode);
+  $('tHand').textContent = hMode === 'arcade' ? 'ARC' : 'NRM'; $('tHand').classList.toggle('nrm', hMode === 'normal'); steerSm = 0; return hMode; }
+const UI_MODES = ['full', 'minimal', 'none']; let uiMode = UI_MODES.includes(localStorage.getItem('sinerally_ui')) ? localStorage.getItem('sinerally_ui') : 'full', unlShown = null;
+function setUi(m) { uiMode = UI_MODES.includes(m) ? m : 'full'; localStorage.setItem('sinerally_ui', uiMode); document.body.classList.toggle('ui-min', uiMode === 'minimal'); document.body.classList.toggle('ui-none', uiMode === 'none');
+  $('tUi').textContent = uiMode === 'full' ? '◉' : uiMode === 'minimal' ? '◐' : '○'; $('tUi').title = 'UI: ' + uiMode.toUpperCase() + ' (I)'; return uiMode; }
+function cycleUi() { return setUi(UI_MODES[(UI_MODES.indexOf(uiMode) + 1) % 3]); }
+$('tUi').onclick = () => { cycleUi(); msg('UI ' + uiMode.toUpperCase()); }; $('tHand').onclick = () => { setHandling(hMode === 'arcade' ? 'normal' : 'arcade'); msg(hMode.toUpperCase() + ' HANDLING'); };
+$('bUnl').onclick = () => rig.unload(); setUi(uiMode); setHandling(hMode);
 // ---------- telemetry + event hooks (read-only window.SR; see PLUGIN_API.md / MERGE_NOTES.md) ----------
 const TEL = { rpm: 0, idle: 0, redline: 0, throttle: 0, brake: 0, boost: false, nitro: 1, gear: 1, gears: 6, shifting: false, load: 0, speed: 0, fwdSpeed: 0, grounded: 0, air: 0,
   surface: 'grass', wheels: [0, 1, 2, 3].map(() => ({ contact: false, surface: 'grass', slipRatio: 0, slipAngle: 0, load: 0 })), vehicle: 'buggy', vehiclePreset: '', soundPreset: '', engineTemp: 70,
@@ -577,6 +601,7 @@ function frame(now) {
   $('spd').textContent = Math.abs(Math.round(fwdSpeed() * 3.6)); $('bar').style.width = (veh.nitro * 100) + '%';
   $('air').textContent = veh.air > 0.5 ? 'AIR ' + veh.air.toFixed(1) + 's!' : '';
   $('carinfo').textContent = (veh.damage >= 1 ? 'DMG ' + veh.damage.toFixed(0) + '%  ' : '') + (veh.cargo.capacity ? 'LOGS ' + veh.cargo.logs + '/' + veh.cargo.capacity : '');
+  { const show = veh.cargo.capacity > 0 && veh.cargo.logs > 0; if (show !== unlShown) { unlShown = show; $('bUnl').style.display = show ? 'block' : 'none'; } if (show) $('bUnl').textContent = 'UNLOAD ' + veh.cargo.logs; }
   if (msgT > 0 && (msgT -= dt) <= 0) $('msg').textContent = '';
   updateTelemetry(); minimap(Math.atan2(camDir.x, camDir.z)); gauge(); tickWp(Math.atan2(camDir.x, camDir.z)); updateLabels(dt); audio.frame(dt);
   if (!QS.has('nopost')) { renderer.setRenderTarget(rt); renderer.render(scene, camera); renderer.setRenderTarget(null); renderer.render(postScene, postCam); }
@@ -590,4 +615,4 @@ window.__st = { get veh() { return veh; }, get state() { return veh; }, rig, T, 
   get q() { return qName; }, setQ(q) { qName = q; applyQuality(); }, get x() { return veh.p.x; }, get z() { return veh.p.z; }, get y() { return veh.p.y; },
   teleport(x, z, yaw = 0) { spawn(x, z, yaw); updateWorld(true); updateCans(true); }, toBiome(name, yaw = 0) { const p = T.findBiome(name, veh.p.x, veh.p.z); if (p) this.teleport(p.x, p.z, yaw); return p; },
   setVehicle, useVehicle, setAttachments, get vName() { return vDef.id; }, openMap, openMenu, setWp, get wx() { return wx; }, setWx(m, snap = true) { wxMode = m; applyWx(); if (snap) T.snapWeather(); }, set tod(v) { tod = v; timeMode = 'Fixed'; applyTime(); },
-  get dynS() { return dynS; }, get labels() { return labTrees; } };
+  get dynS() { return dynS; }, get labels() { return labTrees; }, get handling() { return hMode; }, setHandling, get ui() { return uiMode; }, setUi, cycleUi, rockGone, get rocks() { return colliders; }, collideRocks };

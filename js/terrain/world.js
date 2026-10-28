@@ -127,6 +127,9 @@ export function naturalHeight(x, z) { return natural(x, z); }
 
 // ---------------- road network: graph on a coarse jittered grid, sine-curve edges ----------------
 const RG = 1400, HWY = 1, TRAIL = 2, LOOP = 3;
+// road half-widths (m). v2 widening: paved highways 6 -> 12 (2x), dirt trails 3.6 -> 5.4 and dirt race loops 8 -> 12 (1.5x).
+// Every mask (trees, rocks, grass, fuel, bridges, grade blend, shoulders) derives from e.hw, so they follow automatically.
+export const ROAD_HW = { hwy: 12, trail: 5.4, loop: 12 }, ROAD_HW_V1 = { hwy: 6, trail: 3.6, loop: 8 };
 const nodes = new Map();
 function nodeAt(i, j) {
   const key = (i + 5000) * 10000 + (j + 5000); let n = nodes.get(key);
@@ -150,7 +153,7 @@ function edgeAt(i, j, dir) {
     const a = nodeAt(i, j), b = dir ? nodeAt(i, j + 1) : nodeAt(i + 1, j);
     const dx = b.x - a.x, dz = b.z - a.z, L = Math.hypot(dx, dz), k = 1 + fl(hash(i, j, 23 + dir) * (type === HWY ? 2 : 3));
     const amp = (hash(i, j, 25 + dir) - 0.5) * 2 * (type === HWY ? 0.18 : 0.26) * L / (Math.PI * k);
-    e = { id: key, type, a, b, ax: a.x, az: a.z, L, dx: dx / L, dz: dz / L, nx: -dz / L, nz: dx / L, amp, k, hw: type === HWY ? 6 : 3.6, loop: false };
+    e = { id: key, type, a, b, ax: a.x, az: a.z, L, dx: dx / L, dz: dz / L, nx: -dz / L, nz: dx / L, amp, k, hw: type === HWY ? ROAD_HW.hwy : ROAD_HW.trail, loop: false };
     buildProfile(e);
   }
   edges.set(key, e); return e;
@@ -176,6 +179,9 @@ function buildProfile(e) {
   for (let i = 0; i <= M; i++) { pathPoint(e, i / M, false); p[i] = natural(PP.x, PP.z); wet[i] = p[i] < WATER + 0.6 ? 1 : 0; }
   // narrow rivers fall between 30 m profile samples -> probe 4 sub-samples per segment so grade crossings get a bridge instead of a dam
   for (let i = 0; i < M; i++) for (let k = 1; k < 5; k++) { pathPoint(e, (i + k / 5) / M, false); if (natural(PP.x, PP.z) < WATER + 0.6) { wet[k < 3 ? i : i + 1] = 1; } }
+  // wide roads: a river can run under one edge only -> also probe both road edges (+-hw) at every sub-sample
+  for (let i = 0; i <= M; i++) for (let k = 0; k < 5 && i + k / 5 <= M; k++) { pathPoint(e, (i + k / 5) / M, false); const nx = -PP.tz * e.hw, nz = PP.tx * e.hw;
+    if (natural(PP.x + nx, PP.z + nz) < WATER + 0.6 || natural(PP.x - nx, PP.z - nz) < WATER + 0.6) wet[k < 3 ? i : mn(M, i + 1)] = 1; }
   if (!e.loop) { p[0] = e.a.h; p[M] = e.b.h; }
   const q = new Float32Array(M + 1);
   for (let pass = 0; pass < 14; pass++) {
@@ -211,7 +217,7 @@ const tcache = new Map();
 export function nearTrack(x, z) {
   const ci = fl(x / CELL), cj = fl(z / CELL), key = ci * 100000 + cj;
   let t = tcache.get(key);
-  if (!t) { t = trackOf(ci, cj); t.path = { id: 'L' + t.id, loop: true, trk: t, type: LOOP, hw: 8, k: 0, amp: 0 }; buildProfile(t.path); tcache.set(key, t); }
+  if (!t) { t = trackOf(ci, cj); t.path = { id: 'L' + t.id, loop: true, trk: t, type: LOOP, hw: ROAD_HW.loop, k: 0, amp: 0 }; buildProfile(t.path); tcache.set(key, t); }
   return t;
 }
 // candidate edges per road cell (cached)
@@ -229,10 +235,10 @@ function cellEdges(ci, cj) {
 }
 // distance from (x,z) to path e -> fills PD {d (unsigned), s (signed lateral, + = normal side), t}
 const PD = { d: 1e9, s: 0, t: 0 };
-function pathDist(e, x, z) {
+function pathDist(e, x, z) { // loops: radial offset scaled to the perpendicular distance, so the drivable width matches the mesh ribbon
   if (e.loop) {
     const T = e.trk, dx = x - T.cx, dz = z - T.cz, th = Math.atan2(dz, dx), r = trackR(T, th), rr = Math.hypot(dx, dz);
-    PD.s = rr - r; PD.d = A(PD.s); PD.t = (th < 0 ? th + 6.283185307 : th) / 6.283185307; return true;
+    PD.s = (rr - r) * r / Math.hypot(r, trackDR(T, th)); PD.d = A(PD.s); PD.t = (th < 0 ? th + 6.283185307 : th) / 6.283185307; return true;
   }
   const rx = x - e.ax, rz = z - e.az, proj = rx * e.dx + rz * e.dz, perp = rx * e.nx + rz * e.nz;
   if (proj < -REACH || proj > e.L + REACH || A(perp) > A(e.amp) + REACH) return false;
@@ -291,7 +297,7 @@ export function sample(x, z, o = OUT) {
 export function height(x, z) { return sample(x, z).h; }
 export function ground(x, z) { sample(x, z); return OUT.deck > OUT.h ? OUT.deck : OUT.h; } // physics: includes bridge decks
 export function trackW(x, z) { // 1 on race loop, smooth falloff (kept for scenery/compat)
-  const t = nearTrack(x, z); pathDist(t.path, x, z); return PD.d < 9 ? 1 : PD.d > 22 ? 0 : sst(22, 9, PD.d);
+  const t = nearTrack(x, z), hw = t.path.hw; pathDist(t.path, x, z); return PD.d < hw + 1 ? 1 : PD.d > hw + 14 ? 0 : sst(hw + 14, hw + 1, PD.d);
 }
 export function normal(x, z, out, fn = height) {
   const e = 1.0, hx = fn(x + e, z) - fn(x - e, z), hz = fn(x, z + e) - fn(x, z - e);

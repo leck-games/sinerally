@@ -37,9 +37,21 @@ Standing still with gas + brake > 0.5 free-revs the engine onto the limiter. It 
 | `damageTree(id,hpRemoved,cause)` | no | host store update; returns remaining HP. Without it, physics keeps its own overlay in `s.treeHp` |
 | `waterLevel` | no | number |
 
-`ext.onTreeContact(C, s)` is called for each new trunk contact before it is resolved. `C = {tree, id, x, z, speedKmh, normalKmh, angle, zone:'front'|'rear'|'side', impact, hp, dmg, mode, carDamageMul}`. A hook may change `mode` (`'impact'` default, `'harvest'` = no bounce and no damage, `'solid'` = no tree damage), `dmg` (HP to remove) and `carDamageMul`.
+`ext.onTreeContact(C, s)` is called for each new trunk contact before it is resolved. `C = {tree, id, x, z, speedKmh, normalKmh, angle, zone:'front'|'rear'|'side', impact, hp, dmg, mode, carDamageMul}`. A hook may change `mode` (`'impact'` default, `'harvest'` = no bounce and no damage, `'melt'` = remove all remaining HP at once with no bounce, no speed loss and no car damage (the harvester uses this), `'solid'` = no tree damage), `dmg` (HP to remove) and `carDamageMul`.
 
-Other exports: `API_VERSION, DEFAULTS, HEAT, SURFACES, TREE, treeDamage(kmh, angle), breakLossPerHp(kmh), treeHp(s,t), damageTree(s,world,t,hp,cause), addDamage, repair, recover(s,world), massOf, enginePos, engineTorque, resolveParams, setParams, yawOf`.
+Other exports: `API_VERSION, DEFAULTS, HEAT, SURFACES, TREE, treeDamage(kmh, angle), breakLossPerHp(kmh), treeHp(s,t), damageTree(s,world,t,hp,cause), addDamage, repair, recover(s,world), massOf, enginePos, engineTorque, resolveParams, setParams, yawOf, ARCADE, MODES, setMode(s, 'arcade'|'normal'), topRef(P, mode, nitro)`.
+
+### Handling modes (`s.mode`, default `'arcade'`)
+`PH.setMode(s, 'arcade' | 'normal')` switches at any time, even mid-drive. **NORMAL** is the original tyre model (it used to be called SIM). **ARCADE** keeps the same tyres and adds assists tuned by `ARCADE` (a vehicle def can override any key in `physics.arcade`):
+- grip ×`grip` 1.3, lateral ×`latB`; steering lock ×`maxSteer`, which gets less lock with speed (`steerSpeed`) and a faster rack (`steerRate`). Steering input is rate-limited (`inRate`).
+- Yaw assist: when grounded, yaw rate is driven to `steer · min(yawMax, latG·g / v)` with gain `yawK`. Velocity is pulled onto the heading at `align`/s, so there is little understeer.
+- Drifts: enter with handbrake + steer (|steer| > 0.2) or brake + hard steer (> 0.5) above `driftMin`·1.4 m/s. The controller then holds a slip angle up to `driftAngle` rad; steering sets the angle and `driftTurn` sets how tightly the car carves. Lateral grip ×`driftGrip`, and the speed floor loses only `driftLoss`/s. Drifting fills nitro at `driftNitro`/s. Counter-steer, brake, low speed, or a long jump ends the drift. Events are `drift:start {dir, speed}` and `drift:end {time, angle}`. Over crests the yaw rate is damped, so the car holds its angle instead of spinning.
+- Stability: anti-roll toward the averaged ground normal ×`antiRoll`, plus roll/pitch damping (`rollDamp`). Tyre force lift is capped at `forceLift`. Downforce is `down · v²`. In the air the car self-levels (`airLevel`) and air pitch/yaw is ×`airPitch`/`airYaw`. Landings damp spin and bounce (`landDamp`). Torque ×`torque`, shift time ×`shiftT`.
+- Per-vehicle feel (`vehicles/defs/*.js physics.arcade`): the quad is twitchy (yawK 10, yawMax 2.6, inRate 10), the truck heavier (yawMax 1.6, yawK 5), the SINE GT grippy and fast (grip 1.4, latG 1.6, down 0.0035), and the TIMBERWOLF heavy (yawMax 1.2, yawK 4, antiRoll 4).
+- The tree HP rules and the 300 km/h pass-through are identical in both modes (unit tests run in both: `MODE=normal node tests/unit.mjs`).
+
+### Top-speed governor (`s.mods.topMul`, set from attachment `mods.topMul`)
+`topRef(P, mode, nitro)` is the measured flat-road top speed of the bare vehicle: `P.vtop` (normal) or `P.arcade.vtop` (arcade), in m/s, ×`P.vtopBoost` with nitro. These are measured by `tests/topspeed.mjs`; re-measure after changing power, drag or gearing. With `topMul < 1`, drive torque fades between 0.99 and 1.01 × `topMul·topRef`, nitro push stops, and above that a drag term holds the cap (also downhill). The harvester sets `topMul 0.9`, which gives -10% (measured -9.8% to -10.1% for every vehicle, with and without nitro).
 
 ### Tree rules (`physics/trees.js`, `TREE = {maxHp 3, tapKmh 30, refKmh 200, fullKmh 300, refHp 2, glanceMin .2, exp 1.3}`)
 - Speed is horizontal car speed. Angle is the share of the velocity along the contact normal (1 = head-on, 0 = scraping past).
@@ -67,9 +79,10 @@ Other exports: `API_VERSION, DEFAULTS, HEAT, SURFACES, TREE, treeDamage(kmh, ang
 | `engine:cooled` | temp |
 | `vehicle:damage` | amount total cause |
 | `crash` | value |
+| `drift:start` / `drift:end` | dir speed / time angle (arcade) |
 | `land`, `scrape`, `shift`, `recover` | (sound / FX hooks) |
 
-Attachments emit `harvester:cut {id, remaining}`, `harvester:log {id, logs, total}` and `harvester:full {logs}`. The rig emits `cargo:unload {logs}`.
+Tree `damage`/`destroyed` events from a melt carry `cause:'harvest', melt:true`. Attachments emit `harvester:cut {id, remaining}`, `harvester:log {id, logs, total}` and `harvester:full {logs}`. The rig emits `cargo:unload {logs}`.
 
 ## vehicles/
 
@@ -83,30 +96,30 @@ A def is plain data: `{id, name, blurb, sound, stats{top, accel, grip, weight}, 
 
 | id | name | kg | top km/h (measured, flat) | mounts |
 |---|---|---|---|---|
-| buggy | BUGGY | 1500 | 195 | front roof rear |
-| truck | TRUCK | 2300 | 188 | front roof rear |
-| quad | QUAD | 820 | 207 | front rear |
-| hyper | SINE GT | 1250 | 293 (330 with nitro) | front roof |
-| forester | TIMBERWOLF | 3200 | 146 | front roof rear (harvester + log rack by default) |
+| buggy | BUGGY | 1500 | 195 (arcade 198) | front roof rear |
+| truck | TRUCK | 2300 | 188 (arcade 192) | front roof rear |
+| quad | QUAD | 820 | 207 (arcade 208) | front rear |
+| hyper | SINE GT | 1250 | 293 (arcade 296; 341 with nitro) | front roof |
+| forester | TIMBERWOLF | 3200 | 146 (arcade 149) | front roof rear (harvester + log rack by default; with them 131 / arcade 134) |
 
 ## attachments/
 
 ```js
-import { listAttachments, getAttachment, registerAttachment, compatible, validate, applyMods } from './attachments/index.js';
+import { listAttachments, getAttachment, registerAttachment, compatible, validate, applyMods, melts } from './attachments/index.js'; // melts(ids) -> true if any part melts scenery
 import { renderPicker } from './attachments/picker.js'; // ({container, vehicle, selected, onChange(ids)})
 ```
 
-An attachment is `{id, name, blurb, mounts[], mods{mass, cdA, coolMul, capacity}, create(vehicleDef, host) -> {object, onCollision?(C), update(dt), dispose()}}`.
+An attachment is `{id, name, blurb, mounts[], mods{mass, cdA, coolMul, capacity, topMul, reach}, melts?, create(vehicleDef, host) -> {object, onCollision?(C), update(dt), dispose()}}`.
 `host = {THREE, state, world, emit, mount(name) -> THREE.Group, treeHp(t), damageTree(t, hp, cause), addLogs(n)}`. `validate` allows at most one attachment per mount and drops any that don't fit.
 
 | id | mount | effect |
 |---|---|---|
-| harvester | front | Below 25 km/h, a front contact switches to harvest mode and cuts 1.2 HP/s, giving 1 log per HP. When cargo is full the tree is solid. +180 kg, holds 3 logs |
+| harvester | front | Melts any tree (bush, cactus) it touches at any speed: every front contact (the cutter reaches `mods.reach` 0.9 m ahead of the bumper and sweeps the distance covered each step) uses `mode:'melt'`, which removes all HP at once with no bounce, no speed loss and no car damage. Logs: 1 per HP up to capacity, then `harvester:full` and the tree still melts. `mods {mass 180, capacity 3, topMul 0.9, reach 0.9}`, so -10% top speed. `melts: true` tells the host to melt other scenery (the game uses this for rocks) |
 | bullbar | front | Front impacts do ×1.5 tree damage and ×0.35 car damage. +45 kg |
 | lograck | rear | Holds 12 logs (60 kg each), shown as stacked logs. +90 kg |
 | rooflights | roof | Flashing beacons (cosmetic). +8 kg |
 
 ## host/rig.js
 
-`createRig({THREE, world, emit}) -> {state, vehicle, attach, inst, root, mounts, host, setVehicle(id, attachIds?), setAttachments(ids), step(input, dt), unload()}`. `root` is the attachment parent and gets the vehicle body transform each frame.
-Test page persistence: `localStorage.srp_vehicle` and `srp_attach_<vehicleId>` (JSON).
+`createRig({THREE, world, emit}) -> {state, vehicle, attach, inst, root, mounts, host, setVehicle(id, attachIds?), setAttachments(ids), setMode(mode), step(input, dt), unload()}`. `setVehicle` keeps the current handling mode. `root` is the attachment parent and gets the vehicle body transform each frame.
+Test page persistence: `localStorage.srp_vehicle`, `srp_attach_<vehicleId>` and `srp_handling` (JSON).

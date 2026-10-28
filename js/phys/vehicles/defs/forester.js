@@ -2,7 +2,7 @@
 export default {
   id: 'forester', name: 'TIMBERWOLF', blurb: 'Forestry truck. Mount the harvester head and log rack.', sound: 'diesel-forester',
   stats: { top: 146, accel: 1, grip: 5, weight: 5 },
-  physics: { mass: 3200, dims: [2.4, 2.4, 5.8], inertiaScale: 1.3, wheelR: 0.62, rest: 0.75, k: 105000, cBump: 8200, cReb: 11000, arbF: 36000, arbR: 30000,
+  physics: { vtop: 40.42, vtopBoost: 1.211, arcade: { vtop: 41.48, yawMax: 1.2, yawK: 4, inRate: 4.5, latG: 1.0, align: 1.5, driftAngle: 0.45, driftTurn: 0.7, antiRoll: 4, driftMin: 9 }, mass: 3200, dims: [2.4, 2.4, 5.8], inertiaScale: 1.3, wheelR: 0.62, rest: 0.75, k: 105000, cBump: 8200, cReb: 11000, arbF: 36000, arbR: 30000,
     wheelI: 4.0, hard: [[1.12, -0.25, 1.85], [-1.12, -0.25, 1.85], [1.12, -0.25, -1.75], [-1.12, -0.25, -1.75]],
     torque: [[0, 900], [800, 1150], [1400, 1500], [2200, 1550], [3200, 1350], [4000, 1050], [4600, 800]], idle: 700, redline: 4200,
     gears: [4.4, 2.9, 2.0, 1.45, 1.1], final: 4.8, up: 3700, down: 1700, shiftT: 0.3, split: 0.5,

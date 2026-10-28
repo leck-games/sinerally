@@ -64,6 +64,11 @@ At 0 HP the tree despawns and stays gone. Removed IDs are kept in a Set and pers
 ## Events emitted (`T.on(type, fn)` / `T.off`, and on `bus` if it has `emit`)
 `fire:ignite {x,z,cause}` · `tree:burning|tree:burnt|tree:extinguished|tree:removed {id}` · `weather:lightning {x,y,z}`
 
+## Roads
+- `ROAD_HW = {hwy:12, trail:5.4, loop:12}` gives the half-widths in metres (v1 was `{6, 3.6, 8}`; exported as `ROAD_HW_V1`).
+- `sample(x,z).road` is 1 inside `hw + 0.5` and fades to 0 at `hw + 2.5`. `.rd` is the distance past the edge (negative on the road). `.rtype` is HWY=1, TRAIL=2 or LOOP=3.
+- Trees and bushes spawn only where `road < 0.02 && rd > 3`, game rocks only where `road < 0.05 && rd > 2.5`, and fire fuel needs `road <= 0.15`. Bridges set `deck` within `hw + 1.2`.
+
 ## Misc
 - `uniforms` (shared `U`): shaders of other modules can read the same sun, fog, wetness and fire state.
 - `world` is the raw sine world. `stats()`, `save()` / `load(state)` and `dispose()` are also available, and `FIRE_CELL` = 3.

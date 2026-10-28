@@ -30,9 +30,10 @@ internals. Sections for the other modules are added by their owners.
 - **Host in this game:** `js/main.js` – `createRig({ THREE, world, emit: bus.emit })`, `rig.step(input, 1/120)` in the fixed
   120 Hz loop, `PH.telemetry(rig.state, SR.telemetry)` once per frame, `openSelector` / `renderPicker` in the ☰ menu.
 - **worldQuery the game provides:** `heightAt`, `normalAt`, `surfaceAt` (from Terrain), `queryTrees(x, z, r, out)` → `{id, x, z, r, hp}`,
-  `damageTree(id, removedHp, cause)` → writes integer HP to Terrain (`T.setTreeHP`). Rocks are game-side colliders.
+  `damageTree(id, removedHp, cause)` → writes integer HP to Terrain (`T.setTreeHP`). Rocks are game-side colliders (`[x,z,r,key]`); with an attachment where `melts(ids)` is true they are melted
+  (bus `rock:melted {key,x,z,r,speed}`, persisted). Handling: `rig.setMode('arcade'|'normal')`, game default arcade.
 - **Events out (bus):** `shift land crash scrape recover tree:hit engine:hot engine:overheat engine:cooled
-  harvester:cut|log|full cargo:unload vehicle:damage` (temperature is in telemetry, `engineTemp` for plugins).
+  harvester:cut|log|full cargo:unload vehicle:damage rock:melted` (temperature is in telemetry, `engineTemp` for plugins).
 
 ## Terrain generator (vendored `js/terrain/`, merged 2026-10-28)
 - **Contract:** [`js/terrain/MODULE_API.md`](js/terrain/MODULE_API.md) (verbatim from sinerally-terrain; `js/terrain/VERSION`,

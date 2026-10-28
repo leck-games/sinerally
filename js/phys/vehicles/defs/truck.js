@@ -2,7 +2,7 @@ const T = [[0, 300], [1000, 330], [2000, 420], [3500, 540], [5000, 520], [6500, 
 export default {
   id: 'truck', name: 'TRUCK', blurb: 'Heavy, grippy pickup. Shrugs off small trees.', sound: 'v8-truck',
   stats: { top: 188, accel: 2, grip: 4, weight: 4 },
-  physics: { mass: 2300, dims: [2.2, 1.9, 5.0], wheelR: 0.52, rest: 0.7, k: 76000, cBump: 5600, cReb: 8000, arbF: 26000, arbR: 18000,
+  physics: { vtop: 52.22, vtopBoost: 1.168, arcade: { vtop: 53.24, yawMax: 1.6, yawK: 5, inRate: 5.5, latG: 1.15, align: 1.8, driftAngle: 0.55, driftTurn: 0.85, antiRoll: 3.5 }, mass: 2300, dims: [2.2, 1.9, 5.0], wheelR: 0.52, rest: 0.7, k: 76000, cBump: 5600, cReb: 8000, arbF: 26000, arbR: 18000,
     wheelI: 2.6, hard: [[1.05, -0.1, 1.65], [-1.05, -0.1, 1.65], [1.05, -0.1, -1.6], [-1.05, -0.1, -1.6]], torque: T,
     gears: [3.3, 2.15, 1.55, 1.2, 0.95, 0.78], final: 3.9, brakeF: 4600, brakeR: 3200, hand: 9000, maxSteer: 0.55, steerRate: 2.6, steerSpeed: 0.04,
     cdA: 1.6, airPitch: 13000, airRoll: 5500, airYaw: 3800, boostPush: 7400, vmax: 46, split: 0.5, enginePos: [0, 0.5, 1.8] },

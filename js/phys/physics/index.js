@@ -52,18 +52,33 @@ export const DEFAULTS = {
   heat: HEAT, damageK: 0.12, // car damage per km/h of normal impact speed into a tree that survives (scaled by its remaining HP / 3)
   treeE: 0.25, treeFriction: 0.5,
 };
-export function resolveParams(p = {}) { const r = { ...DEFAULTS, ...p }; r.heat = { ...HEAT, ...(p.heat || {}) }; return r; }
+// ARCADE handling (default mode; 'normal' = the original sim model). Per-vehicle overrides: def.physics.arcade = {...}.
+// yaw-rate steering (target yaw rate from input, capped by latG), velocity alignment (high lateral grip, little understeer),
+// brake/handbrake drifts that hold their angle and keep speed (and fill nitro), strong anti-roll to the ground normal,
+// downforce, stable landings, extra air control, quicker acceleration/shifts.
+export const ARCADE = {
+  grip: 1.3, latB: 1.2, maxSteer: 1.0, steerSpeed: 0.6, steerRate: 2.0, inRate: 7, // steering
+  yawMax: 2.0, latG: 1.35, yawK: 7, align: 2.2, // yaw-rate assist + velocity alignment (rad/s)
+  driftMin: 11, driftAngle: 0.6, driftTurn: 1.0, driftK: 4.5, driftGrip: 0.3, driftLoss: 0.03, driftNitro: 0.1, // drifts
+  antiRoll: 3.0, rollDamp: 2.2, forceLift: 0.85, down: 0.0025, // stability, downforce m*down*v^2
+  airLevel: 2.2, airYaw: 1.5, airPitch: 1.3, landDamp: 0.35, // air / landing
+  torque: 1.15, shiftT: 0.6, // acceleration
+};
+export const MODES = ['arcade', 'normal'];
+export function resolveParams(p = {}) { const r = { ...DEFAULTS, ...p }; r.heat = { ...HEAT, ...(p.heat || {}) }; r.arcade = { ...ARCADE, ...(p.arcade || {}) }; return r; }
+// handling mode: 'arcade' (default) | 'normal'
+export function setMode(s, mode) { s.mode = mode === 'normal' ? 'normal' : 'arcade'; s.drift = null; return s.mode; }
 
 export function createState(params) {
   const s = {
     P: resolveParams(params), p: V(), v: V(), q: { x: 0, y: 0, z: 0, w: 1 }, w: V(), left: V(1, 0, 0), up: V(0, 1, 0), fwd: V(0, 0, 1),
     gear: 1, rpm: 900, shift: 0, steer: 0, air: 0, airMax: 0, nitro: 1, grounded: 0, flipT: 0, revT: 0, vy0: 0, holdT: 0, spinT: 0,
     tcCut: 1, slipD: 0, thr: 0, brk: 0, load: 0, boosting: false, limiter: false, time: 0,
-    assist: { stab: true, tc: true }, gripMul: 1,
+    assist: { stab: true, tc: true }, gripMul: 1, mode: 'arcade', drift: null, ain: 0, driftT: 0, offT: 0,
     heat: { temp: 70, limT: 0, over: false, hotT: 0, cut: false },
     damage: 0, // 0..100 car damage (derates torque up to 35 %, radiator cooling up to 50 %)
     cargo: { logs: 0, capacity: 0, logMass: 60 },
-    mods: { mass: 0, cdA: 0, treeDamageMul: 1, carDamageMul: 1, coolMul: 1 }, // set by host from attachments
+    mods: { mass: 0, cdA: 0, treeDamageMul: 1, carDamageMul: 1, coolMul: 1, topMul: 1 }, // set by host from attachments (topMul: top-speed governor, harvester 0.9)
     treeCD: {}, treeHp: {}, events: [], wheels: [],
     F: V(), T: V(), _a: V(), _b: V(), _c: V(), _d: V(), _e: V(), _f: V(), _n: V(),
   };
@@ -111,19 +126,25 @@ export function step(s, inp, dt, world, ext) {
   else if (s.gear < 0 && thr > 0 && fwdSpeed > -1.0) s.gear = 1; else s.revT = 0;
   if (s.gear < 0) { const t = thr; thr = brk; brk = t; }
   // steering: speed-sensitive, smoothed, counter-steer assist
-  const vs = Math.max(0, Math.abs(fwdSpeed));
-  let target = (inp.steer || 0) * c.maxSteer / (1 + vs * c.steerSpeed);
-  if (s.grounded >= 2 && vs > 4 && fwdSpeed > 0) target += clamp(Math.atan2(dot(v, left), fwdSpeed), -0.5, 0.5) * 0.55 * (inp.hand ? 0.5 : 1);
-  target = clamp(target, -c.maxSteer, c.maxSteer); s.steer += clamp(target - s.steer, -c.steerRate * dt, c.steerRate * dt);
+  const vs = Math.max(0, Math.abs(fwdSpeed)), A = s.mode === 'arcade' ? c.arcade : null, vh0 = Math.hypot(v.x, v.z);
+  const beta = Math.atan2(dot(v, left), Math.abs(fwdSpeed) + 1e-6); // velocity angle relative to the nose (+ = sliding left)
+  const mSt = c.maxSteer * (A ? A.maxSteer : 1), stRate = c.steerRate * (A ? A.steerRate : 1);
+  let target = (inp.steer || 0) * mSt / (1 + vs * c.steerSpeed * (A ? A.steerSpeed : 1));
+  if (A) { s.ain += clamp((inp.steer || 0) - s.ain, -A.inRate * dt, A.inRate * dt); arcadeDrift(s, inp, dt, A, fwdSpeed, beta, brk, thr); }
+  if (s.drift) target = clamp(beta, -mSt, mSt) * 0.9 + (inp.steer || 0) * 0.15; // drifting: wheels point along the velocity (visual counter-steer)
+  else if (s.grounded >= 2 && vs > 4 && fwdSpeed > 0) target += clamp(beta, -0.5, 0.5) * 0.55 * (inp.hand ? 0.5 : 1) * (A ? 0.4 : 1);
+  target = clamp(target, -mSt, mSt); s.steer += clamp(target - s.steer, -stRate * dt, stRate * dt);
   // engine
   const W = s.wheels, drivenOmega = (W[0].omega + W[1].omega) * 0.5 * c.split + (W[2].omega + W[3].omega) * 0.5 * (1 - c.split);
   const gr = ratio(s) * c.final, wheelRpm = Math.abs(drivenOmega * gr) * 60 / 6.2832;
   const revIn = thr > 0 && brk > 0.5 && vs < 2 && s.gear > 0; s.revving = revIn; // gas+brake standing still = clutch in, free-revving (hits the limiter -> heat)
   s.rpm += (Math.min(c.redline + 150, revIn ? c.redline + 150 : Math.max(c.idle + thr * 900 * (vs < 3 ? 1 : 0), wheelRpm)) - s.rpm) * Math.min(1, dt * (revIn ? 4 : 20));
   const over = s.heat.temp >= H.overheat, nitroOn = !!inp.boost && s.nitro > 0 && !over && !s.heat.cut;
-  const tqMul = (nitroOn ? c.boostTorque : 1) * (over ? H.derate : 1) * (1 - 0.35 * s.damage / 100) * (s.heat.cut ? 0 : 1);
+  const tqMul = (A ? A.torque : 1) * (nitroOn ? c.boostTorque : 1) * (over ? H.derate : 1) * (1 - 0.35 * s.damage / 100) * (s.heat.cut ? 0 : 1);
   let Te = 0; if (s.shift > 0) s.shift -= dt; else if (s.rpm < c.redline) Te = thr * engineTorque(c, s.rpm) * tqMul;
+  if (s.drift) Te *= 0.8; // sliding: part of the power goes into the slide
   s.limiter = thr > 0 && s.rpm >= c.redline - 60;
+  const vcap = topCap(s, nitroOn); if (vcap && Te > 0 && fwdSpeed > vcap * 0.99) Te *= clamp((vcap * 1.01 - fwdSpeed) / (vcap * 0.02), 0, 1); // attachment top-speed governor
   const tcT = s.assist.tc ? clamp(1 - (s.slipD - 0.16) * 2.2, 0.35, 1) : 1; s.tcCut += (tcT - s.tcCut) * Math.min(1, dt * 12);
   if (Te > 0 && fwdSpeed > -1) Te *= s.tcCut;
   if (revIn) Te = 0;
@@ -134,7 +155,7 @@ export function step(s, inp, dt, world, ext) {
   const rpmAt = g => Math.abs(fwdSpeed) / c.wheelR * c.gears[g - 1] * c.final * 9.549;
   if (s.holdT > 0) s.holdT -= dt; s.spinT = s.rpm > c.up && thr ? s.spinT + dt : 0;
   if (s.grounded >= 2 && s.shift <= 0 && s.gear > 0) {
-    if (s.rpm > c.up && s.gear < c.gears.length && thr && (rpmAt(s.gear) > c.up * 0.92 || (s.spinT > 0.6 && fwdSpeed > 2))) { s.gear++; s.shift = c.shiftT; s.holdT = 1.0; s.spinT = 0; emit(s, 'shift', { value: s.gear }); }
+    if (s.rpm > c.up && s.gear < c.gears.length && thr && (rpmAt(s.gear) > c.up * 0.92 || (s.spinT > 0.6 && fwdSpeed > 2))) { s.gear++; s.shift = c.shiftT * (A ? A.shiftT : 1); s.holdT = 1.0; s.spinT = 0; emit(s, 'shift', { value: s.gear }); }
     else if (s.gear > 1 && s.holdT <= 0 && rpmAt(s.gear) < c.down && s.rpm < c.down + 900 && rpmAt(s.gear - 1) < c.up - 400) { s.gear--; s.shift = c.shiftT * 0.6; emit(s, 'shift', { value: s.gear }); }
   }
   // wheels: raycast along -up
@@ -162,18 +183,18 @@ export function step(s, inp, dt, world, ext) {
     Fs = Math.max(0, Fs); const Fz = Fs * Math.max(0.2, dot(up, n)); wh.load = Fz;
     const hd = s._b; set(hd, fwd.x * Math.cos(wh.steer) + left.x * Math.sin(wh.steer), fwd.y * Math.cos(wh.steer) + left.y * Math.sin(wh.steer), fwd.z * Math.cos(wh.steer) + left.z * Math.sin(wh.steer));
     addS(hd, n, -dot(hd, n)); norm(hd); const lt = cross(s._c, n, hd);
-    const app = s._d; set(app, wh.cp.x + (p.x - wh.cp.x) * c.forceLift, wh.cp.y + (p.y - wh.cp.y) * c.forceLift, wh.cp.z + (p.z - wh.cp.z) * c.forceLift);
+    const fl = A ? Math.max(c.forceLift, A.forceLift) : c.forceLift, app = s._d; set(app, wh.cp.x + (p.x - wh.cp.x) * fl, wh.cp.y + (p.y - wh.cp.y) * fl, wh.cp.z + (p.z - wh.cp.z) * fl);
     const r = set(s._e, wh.cp.x - p.x, wh.cp.y - p.y, wh.cp.z - p.z), vc = addS(cross(s._f, w, r), v, 1);
-    const vLong = dot(vc, hd), vLat = dot(vc, lt), mu = sp.mu * s.gripMul, B = c.lonB * sp.bs, R = c.wheelR, den = Math.max(Math.abs(vLong), 3);
+    const vLong = dot(vc, hd), vLat = dot(vc, lt), mu = sp.mu * s.gripMul * (A ? A.grip : 1), B = c.lonB * sp.bs, R = c.wheelR, den = Math.max(Math.abs(vLong), 3);
     let Td = (wh.front ? c.split : 1 - c.split) * 0.5 * driveTotal, Tb = brk * (wh.front ? c.brakeF : c.brakeR) * Math.sqrt(mf) + (hold ? 1500 * mf : 0);
-    if (inp.hand && !wh.front) { Tb = Math.max(Tb, c.hand); Td = 0; }
+    if (inp.hand && !wh.front && !s.drift) { Tb = Math.max(Tb, c.hand); Td = 0; }
     const kap = (wh.omega * R - vLong) / den, F0 = mu * Fz * MF(kap, B, c.lonC, c.lonE);
     const dF = mu * Fz * (MF(kap + 0.01, B, c.lonC, c.lonE) - MF(kap - 0.01, B, c.lonC, c.lonE)) / 0.02 * R / den;
     const Ieff = c.wheelI + dt * R * Math.max(0, dF); let om = wh.omega + dt * (Td - R * F0) / Ieff;
-    if (Tb > 0) { const dw = Tb * dt / Ieff * (kap < -0.25 && !(inp.hand && !wh.front) ? 0.35 : 1); om = Math.abs(om) <= dw ? 0 : om - Math.sign(om) * dw; } // ABS-ish
+    if (Tb > 0) { const dw = Tb * dt / Ieff * (kap < -0.25 && !(inp.hand && !wh.front && !s.drift) ? 0.35 : 1); om = Math.abs(om) <= dw ? 0 : om - Math.sign(om) * dw; } // ABS-ish
     wh.omega = om; const kap2 = (om * R - vLong) / den;
     let Fx = mu * Fz * MF(kap2, B, c.lonC, c.lonE); const alpha = Math.atan(vLat / Math.max(Math.abs(vLong), 2.5));
-    let Fy = -mu * Fz * MF(alpha, c.latB * sp.bs, c.latC, c.latE);
+    let Fy = -mu * Fz * MF(alpha, c.latB * sp.bs * (A ? A.latB : 1), c.latC, c.latE) * (s.drift ? A.driftGrip : 1);
     const lim = mu * Fz, mag = Math.hypot(Fx, Fy); if (mag > lim) { Fx *= lim / mag; Fy *= lim / mag; }
     Fx -= Math.tanh(vLong * 2) * sp.roll * Fz;
     wh.sl = kap2; wh.sa = alpha; if (Td > 0 && kap2 > slipMax) slipMax = kap2; wh.Fx = Fx; wh.Fy = Fy;
@@ -193,18 +214,27 @@ export function step(s, inp, dt, world, ext) {
   // aero, terminal-speed cap, water, nitro
   addS(s.F, v, -0.5 * 1.2 * (c.cdA + s.mods.cdA) * speed);
   if (speed > c.vmax) addS(s.F, v, -m * 0.006 * (speed - c.vmax));
+  if (vcap && speed > vcap * 1.01) addS(s.F, v, -m * 0.4 * (speed - vcap * 1.01) / speed); // governor: hard cap also downhill
+  if (A && ng > 0) addS(s.F, up, -m * A.down * speed * speed * (ng / 4)); // downforce
   if (v.y < -22) s.F.y += m * 0.03 * (v.y + 22) * (v.y + 22);
   if (world.waterLevel !== undefined) { const depth = world.waterLevel + 0.5 - p.y; if (depth > 0) { const d = Math.min(depth, 1.6); addS(s.F, v, -(500 + 90 * speed) * d * mf); s.F.y += m * c.g * 0.35 * d / 1.6; addS(s.T, w, -2500 * d); } }
-  if (nitroOn) { addS(s.F, fwd, c.boostPush * mf); s.nitro = Math.max(0, s.nitro - dt * c.nitroDrain); }
+  if (nitroOn) { addS(s.F, fwd, c.boostPush * mf * (vcap && fwdSpeed > vcap * 0.99 ? 0 : 1)); s.nitro = Math.max(0, s.nitro - dt * c.nitroDrain); }
   else if (!inp.boost) s.nitro = Math.min(1, s.nitro + dt * (s.air > 0.4 ? c.nitroAirRegen : c.nitroRegen));
   // stability assist + air control
-  { const kk = (ng > 0 ? c.assistGround : c.assistAir) * (s.assist.stab ? 1.6 : 1), ax = cross(s._a, up, set(s._b, 0, 1, 0));
-    if (ng === 0) addS(ax, left, -dot(ax, left) * 0.85); addS(s.T, ax, kk * m);
-    if (s.assist.stab && ng > 0 && !inp.hand) addS(s.T, up, -dot(w, up) * m * 0.5); }
+  { const kk = (ng > 0 ? c.assistGround : c.assistAir) * (s.assist.stab ? 1.6 : 1) * (A ? (ng > 0 ? A.antiRoll : A.airLevel) : 1), ref = set(s._b, 0, 1, 0);
+    if (A && ng > 0) { set(ref, 0, 0, 0); for (const wh of W) if (wh.contact) addS(ref, wh.n, 1); norm(ref); } // arcade: level to the ground under the car
+    const ax = cross(s._a, up, ref);
+    if (ng === 0) addS(ax, left, -dot(ax, left) * (A ? 0.6 : 0.85)); addS(s.T, ax, kk * m);
+    if (A && ng > 0) { const wu = dot(w, up); addS(s.T, set(s._c, w.x - up.x * wu, w.y - up.y * wu, w.z - up.z * wu), -m * A.rollDamp); } // roll/pitch damping
+    if (A && ng >= 2) arcadeYaw(s, dt, A, Ib[1], fwdSpeed, beta, vs);
+    else if (A && s.drift) addS(s.T, up, -Ib[1] * 3 * dot(w, up)); // drift over a crest: hold the angle instead of spinning on
+    else if (s.assist.stab && ng > 0 && !inp.hand) addS(s.T, up, -dot(w, up) * m * 0.5); }
   if (ng === 0) { s.air += dt; s.airMax = Math.max(s.airMax, s.air); const pitch = clamp(inp.pitch || 0, -1, 1), roll = inp.steer || 0;
-    addS(s.T, left, pitch * c.airPitch * mf); addS(s.T, fwd, -roll * c.airRoll * mf * (inp.hand ? 1 : 0.6)); addS(s.T, up, roll * c.airYaw * mf * (inp.hand ? 0 : 1)); addS(s.T, w, -400 * mf); }
+    const ap = A ? A.airPitch : 1, ay = A ? A.airYaw : 1;
+    addS(s.T, left, pitch * c.airPitch * mf * ap); addS(s.T, fwd, -roll * c.airRoll * mf * (inp.hand ? 1 : 0.6)); addS(s.T, up, roll * c.airYaw * mf * ay * (inp.hand ? 0 : 1)); addS(s.T, w, -400 * mf * (A ? 2 : 1)); }
   else { if (s.air > 0.35) { const imp = Math.max(0, -s.vy0); emit(s, 'land', { value: imp, air: s.air });
-      if (imp > 9) { const kk = clamp(1 - (imp - 9) * 0.04, 0.45, 1); if (v.y < 0) v.y *= kk; set(w, w.x * kk, w.y * kk, w.z * kk); } } s.air = 0; }
+      if (imp > 9) { const kk = clamp(1 - (imp - 9) * 0.04, 0.45, 1); if (v.y < 0) v.y *= kk; set(w, w.x * kk, w.y * kk, w.z * kk); }
+      if (A) { const wu = dot(w, up), k2 = A.landDamp; set(w, up.x * wu + (w.x - up.x * wu) * k2, up.y * wu + (w.y - up.y * wu) * k2, up.z * wu + (w.z - up.z * wu) * k2); if (v.y < 0) v.y *= 0.7; } } s.air = 0; }
   s.vy0 = v.y;
   // integrate (semi-implicit Euler), 60 g force clamp
   { const a = len(s.F) / m, amax = 60 * c.g; if (a > amax) { const k = amax / a; set(s.F, s.F.x * k, s.F.y * k, s.F.z * k); } }
@@ -212,6 +242,7 @@ export function step(s, inp, dt, world, ext) {
   const tl = dot(s.T, left) / Ib[0], tu = dot(s.T, up) / Ib[1], tf = dot(s.T, fwd) / Ib[2];
   addS(w, left, tl * dt); addS(w, up, tu * dt); addS(w, fwd, tf * dt); set(w, w.x * (1 - 0.05 * dt), w.y * (1 - 0.05 * dt), w.z * (1 - 0.05 * dt));
   const wl = len(w); if (wl > 20) set(w, w.x * 20 / wl, w.y * 20 / wl, w.z * 20 / wl);
+  if (A && ng >= 2) arcadeVel(s, dt, A, inp, thr, vh0, fwdSpeed, beta, vs);
   addS(p, v, dt);
   { const q = s.q, ax = w.x * dt * 0.5, ay = w.y * dt * 0.5, az = w.z * dt * 0.5; // q += 0.5*(w,0)*q*dt
     const dx = ax * q.w + ay * q.z - az * q.y, dy = ay * q.w + az * q.x - ax * q.z, dz = az * q.w + ax * q.y - ay * q.x, dw = -ax * q.x - ay * q.y - az * q.z;
@@ -226,6 +257,37 @@ export function step(s, inp, dt, world, ext) {
   if (up.y < 0.35 && (speed < 4 || s.grounded === 0 && s.air > 4 || up.y < 0)) { s.flipT += dt; if (s.flipT > (speed < 4 ? 2.5 : 3.5)) recover(s, world); } else s.flipT = 0;
 }
 
+// ---------- arcade helpers ----------
+// top-speed governor: mods.topMul (<1) caps speed at topMul * the vehicle's measured flat top speed for the current mode
+export function topRef(P, mode, nitro) { const t = mode === 'normal' ? (P.vtop || P.vmax * 1.08) : (P.arcade.vtop || P.vtop || P.vmax * 1.08); return t * (nitro ? (P.vtopBoost || 1.13) : 1); }
+function topCap(s, nitro) { const k = s.mods.topMul; return k && k < 1 ? k * topRef(s.P, s.mode, nitro) : 0; }
+function arcadeDrift(s, inp, dt, A, fwdSpeed, beta, brk, thr) {
+  const st = s.ain, d = s.drift;
+  if (!d) { // entry: handbrake while steering, or a brake tap while steering hard at speed
+    if (s.grounded >= 2 && fwdSpeed > A.driftMin && s.gear > 0 && ((inp.hand && Math.abs(st) > 0.2) || (brk > 0 && Math.abs(st) > 0.5 && fwdSpeed > A.driftMin * 1.4))) {
+      s.drift = { dir: Math.sign(st), t: 0, max: 0, tgt: A.driftAngle * 0.6, rv: 0 }; s.offT = 0; emit(s, 'drift:start', { dir: s.drift.dir, speed: fwdSpeed * 3.6 }); }
+    return; }
+  d.t += dt; const a = Math.abs(beta); d.max = Math.max(d.max, a);
+  s.offT = (!thr && !inp.hand) || (brk > 0 && !thr) ? s.offT + dt : 0;
+  const sd = st * d.dir, tgt = A.driftAngle * clamp(sd >= 0 ? 0.45 + 0.55 * sd : 0.45 + 1.0 * sd, 0, 1); d.tgt = tgt;
+  if (fwdSpeed < A.driftMin * 0.55 || s.grounded < 2 && s.air > 0.3 || (tgt < 0.06 && a < 0.14) || s.offT > 0.5 || a > 1.35 || (d.t > 0.4 && sd < -0.2 && a < 0.1)) {
+    emit(s, 'drift:end', { time: Math.round(d.t * 100) / 100, angle: Math.round(d.max * 573) / 10 }); s.drift = null; return; }
+  if (a > 0.2) s.nitro = Math.min(1, s.nitro + dt * A.driftNitro);
+}
+function arcadeYaw(s, dt, A, Iy, fwdSpeed, beta, vs) {
+  const r = dot(s.w, s.up), d = s.drift; let rd;
+  if (d) { const rv = d.dir * Math.min(A.driftTurn * (0.35 + 0.65 * clamp(s.ain * d.dir, 0, 1)) * (d.tgt > 0.06 ? 1 : 0), A.latG * s.P.g * 1.15 / Math.max(vs, 1));
+    d.rv = rv; rd = rv + clamp(A.driftK * (beta - (-d.dir * d.tgt)), -1.3, 1.3); }
+  else { const rmax = Math.min(A.yawMax, A.latG * s.P.g / Math.max(vs, 1)) * clamp(vs / 4, 0, 1); rd = s.ain * rmax * (fwdSpeed < -0.5 ? -1 : 1); }
+  addS(s.T, s.up, Iy * A.yawK * (rd - r));
+}
+function arcadeVel(s, dt, A, inp, thr, vh0, fwdSpeed, beta, vs) {
+  const v = s.v, d = s.drift; let phi = 0;
+  if (d) phi = (d.rv || 0) * dt; // carve the path while sliding
+  else if (fwdSpeed > 3 && Math.abs(beta) < 1.0) phi = clamp(-beta, -A.align * dt, A.align * dt); // grip: velocity follows the nose
+  if (phi) { const cs = Math.cos(phi), sn = Math.sin(phi), x = v.x, z = v.z; v.x = x * cs + z * sn; v.z = -x * sn + z * cs; }
+  if (d) { const vh = Math.hypot(v.x, v.z), floor = vh0 * (1 - A.driftLoss * (thr ? 1 : 4) * dt); if (vh > 0.1 && vh < floor) { v.x *= floor / vh; v.z *= floor / vh; } }
+}
 function updateHeat(s, dt, mf, speed) {
   const c = s.P, H = c.heat, h = s.heat;
   heatStep(h, H, dt, { thr: s.thr, rpmFrac: Math.min(1.05, s.rpm / c.redline), load: s.load, nitro: s.boosting, limiter: s.limiter, speed,
@@ -254,21 +316,22 @@ export function damageTree(s, world, t, amount, cause = 'impact', extra = {}) {
   return remaining;
 }
 function collideTrees(s, dt, world, ext, m, Iy) {
-  const c = s.P, p = s.p, v = s.v, hw = c.dims[0] / 2, hl = c.dims[2] / 2;
+  const c = s.P, p = s.p, v = s.v, hw = c.dims[0] / 2, hl = c.dims[2] / 2, ext0 = s.mods.reach || 0; // reach: front cutter (harvester head) beyond the bumper
   for (const id in s.treeCD) if ((s.treeCD[id] -= dt) <= 0) delete s.treeCD[id];
-  treeBuf.length = 0; const trees = world.queryTrees(p.x, p.z, hl + hw + 1.5, treeBuf); if (!trees || !trees.length) return;
+  treeBuf.length = 0; const trees = world.queryTrees(p.x, p.z, hl + hw + 1.5 + ext0 + Math.hypot(v.x, v.z) * dt, treeBuf); if (!trees || !trees.length) return;
   let fx = s.fwd.x, fz = s.fwd.z; const fl = Math.hypot(fx, fz) || 1; fx /= fl; fz /= fl; const lx = fz, lz = -fx; // horizontal fwd / left
   for (const t of trees) {
     const hp0 = treeHp(s, t); if (hp0 <= 0) continue;
     if (p.y - world.heightAt(t.x, t.z) > 6) continue; // jumped over
     const dx = t.x - p.x, dz = t.z - p.z, u = dx * lx + dz * lz, f = dx * fx + dz * fz; // tree centre in car frame
-    const cu = clamp(u, -hw, hw), cf = clamp(f, -hl, hl);
+    const reach = ext0 ? ext0 + Math.max(0, dot(v, s.fwd)) * dt : 0; // swept forward so fast cutters never tunnel
+    const cu = clamp(u, -hw, hw), cf = clamp(f, -hl, hl + reach);
     let nx, nz, dist; // n: from tree towards car
     const px = p.x + cu * lx + cf * fx, pz = p.z + cu * lz + cf * fz; // closest point on box
     dist = Math.hypot(px - t.x, pz - t.z);
     if (dist > t.r + 0.08) continue;
     if (dist > 1e-4) { nx = (px - t.x) / dist; nz = (pz - t.z) / dist; }
-    else { const ou = hw - Math.abs(u), of = hl - Math.abs(f); if (ou < of) { const sg = u > 0 ? -1 : 1; nx = sg * lx; nz = sg * lz; dist = -ou; } else { const sg = f > 0 ? -1 : 1; nx = sg * fx; nz = sg * fz; dist = -of; } }
+    else { const ou = hw - Math.abs(u), of = (f > 0 ? hl + reach : hl) - Math.abs(f); if (ou < of) { const sg = u > 0 ? -1 : 1; nx = sg * lx; nz = sg * lz; dist = -ou; } else { const sg = f > 0 ? -1 : 1; nx = sg * fx; nz = sg * fz; dist = -of; } }
     const pen = t.r - dist, rx = px - p.x, rz = pz - p.z;
     const vcx = v.x - s.w.y * rz, vcz = v.z + s.w.y * rx; // contact point velocity (yaw only)
     const vn = vcx * nx + vcz * nz, vh = Math.hypot(v.x, v.z), kmh = vh * 3.6, angle = vh > 0.1 ? clamp(-vn / vh, 0, 1) : 0;
@@ -276,6 +339,8 @@ function collideTrees(s, dt, world, ext, m, Iy) {
     const C = { tree: t, id: t.id, x: t.x, z: t.z, speedKmh: kmh, normalKmh: Math.max(0, -vn) * 3.6, angle, zone, impact, hp: hp0,
       dmg: impact ? treeDamage(kmh, angle) * s.mods.treeDamageMul : 0, mode: 'impact', carDamageMul: s.mods.carDamageMul };
     if (ext && ext.onTreeContact) ext.onTreeContact(C, s);
+    if (C.mode === 'melt') { damageTree(s, world, t, hp0, 'harvest', { speed: kmh, zone, melt: true }); continue; } // cutter: gone at once, no push, no loss, no damage
+    if (cf > hl) continue; // only the cutter reach touches it, and the attachment did not cut it
     if (C.mode !== 'impact') C.dmg = 0;
     let remaining = hp0;
     if (impact) { s.treeCD[t.id] = 0.4; if (C.dmg > 0.005) remaining = damageTree(s, world, t, C.dmg, 'impact', { speed: kmh, angle, zone }); }

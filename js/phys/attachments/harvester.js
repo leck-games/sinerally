@@ -1,9 +1,13 @@
-// Tree harvester head (front mount): drive gently (< 25 km/h) into a tree with the head and it saws the tree down,
-// removing HP at `rate` per second and adding one log to cargo per HP instead of smashing it.
+// Tree harvester head (front mount): melts anything in its path at any speed. Every tree / bush / cactus the head (or the
+// car's front) touches loses all its HP at once and is gone — no speed loss, no car damage, no push-out — and drops logs into
+// cargo at 1 log per HP (capped by capacity; when full the head still cuts, it just stops collecting and emits harvester:full).
+// Penalty: mods.topMul 0.9 -> physics caps top speed at 90 % of the same vehicle without the head (see MODULE_API.md).
+// Hosts with their own colliders (rocks etc.) check `melts` on the attachment def to destroy them on front contact too.
 export default {
-  id: 'harvester', name: 'HARVESTER HEAD', blurb: 'Saw trees down gently (<25 km/h). 1 log per HP.', mounts: ['front'],
-  mods: { mass: 180, capacity: 3 }, // capacity = logs the head itself can hold
-  params: { maxKmh: 25, rate: 1.2 },
+  id: 'harvester', name: 'HARVESTER HEAD', blurb: 'Melts trees, bushes & rocks in its path instantly, any speed. 1 log per HP. -10% top speed.', mounts: ['front'],
+  mods: { mass: 180, capacity: 3, topMul: 0.9, reach: 0.9 }, // capacity = logs the head itself can hold; reach = cutter beyond the bumper (m)
+  melts: true,
+  params: { spin: 40 },
   create(vehicle, host) {
     const T = host.THREE, g = new T.Group(), P = this.params;
     const dark = new T.MeshLambertMaterial({ color: 0x2b2f3a }), yel = new T.MeshLambertMaterial({ color: 0xffd23c }), steel = new T.MeshLambertMaterial({ color: 0xc8ccd4 });
@@ -13,27 +17,18 @@ export default {
     const saw = new T.Mesh(new T.CylinderGeometry(0.42, 0.42, 0.05, 14), steel); saw.position.set(0, -0.42, 0.95); g.add(saw);
     const teeth = new T.Mesh(new T.BoxGeometry(0.9, 0.06, 0.06), dark); saw.add(teeth);
     host.mount('front').add(g);
-    let target = null, seen = 0, acc = 0, full = false, active = false;
+    let full = false, activeT = 0;
     return {
       object: g,
-      get active() { return active; },
+      get active() { return activeT > 0; },
       onCollision(C) {
-        if (C.zone !== 'front' || C.speedKmh > P.maxKmh) return;
-        const s = host.state;
-        if (s.cargo.logs >= s.cargo.capacity) { C.mode = 'solid'; if (!full) { full = true; host.emit('harvester:full', { logs: s.cargo.logs }); } return; }
-        full = false; C.mode = 'harvest'; if (!target || target.id !== C.id) { target = C.tree; acc = 0; } seen = 0.25;
+        if (C.zone !== 'front') return;
+        C.mode = 'melt'; activeT = 0.4; const s = host.state, hp = Math.round(C.hp);
+        if (s.cargo.logs >= s.cargo.capacity) { if (!full) { full = true; host.emit('harvester:full', { logs: s.cargo.logs }); } }
+        else { full = false; const got = host.addLogs(hp); if (got > 0) host.emit('harvester:log', { id: C.id, logs: got, total: s.cargo.logs }); }
+        host.emit('harvester:cut', { id: C.id, remaining: 0, speed: C.speedKmh });
       },
-      update(dt) {
-        seen -= dt; active = !!target && seen > 0; saw.rotation.y += dt * (active ? 40 : 2);
-        if (!active) { if (seen < -1) target = null; return; }
-        const s = host.state; if (s.cargo.logs >= s.cargo.capacity) return;
-        const before = host.treeHp(target); if (before <= 0) { target = null; return; }
-        const rem = host.damageTree(target, Math.min(before, P.rate * dt), 'harvest');
-        acc += before - rem; let logs = Math.floor(acc + 1e-6); if (rem <= 0) logs = Math.round(acc);
-        if (logs > 0) { acc -= logs; const got = host.addLogs(logs); host.emit('harvester:log', { id: target.id, logs: got, total: s.cargo.logs }); }
-        host.emit('harvester:cut', { id: target.id, remaining: rem });
-        if (rem <= 0) { target = null; acc = 0; }
-      },
+      update(dt) { activeT -= dt; saw.rotation.y += dt * (activeT > 0 ? P.spin : P.spin * 0.25); },
       dispose() { g.parent && g.parent.remove(g); g.traverse(o => o.geometry && o.geometry.dispose()); [dark, yel, steel].forEach(m => m.dispose()); },
     };
   },

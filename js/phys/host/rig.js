@@ -16,7 +16,7 @@ export function createRig({ THREE, world, emit = () => {} }) {
   const ext = { onTreeContact: (C, s) => { for (const i of rig.inst) if (i.onCollision) i.onCollision(C, s); } };
   rig.setVehicle = (id, attach) => {
     const keep = rig.state; rig.vehicle = getVehicle(id);
-    const s = PH.createState(rig.vehicle.physics);
+    const s = PH.createState(rig.vehicle.physics); if (keep) PH.setMode(s, keep.mode); else if (rig.mode) PH.setMode(s, rig.mode);
     if (keep) { PH.spawn(s, world, keep.p.x, keep.p.z, PH.yawOf(keep)); } else PH.spawn(s, world, 0, 0, 0);
     rig.state = s;
     for (const k in rig.mounts) rig.root.remove(rig.mounts[k]); rig.mounts = {};
@@ -27,11 +27,12 @@ export function createRig({ THREE, world, emit = () => {} }) {
   rig.setAttachments = ids => {
     for (const i of rig.inst) i.dispose(); rig.inst = [];
     rig.attach = validate(rig.vehicle, ids); const m = applyMods(rig.attach), s = rig.state;
-    s.mods.mass = m.mass; s.mods.cdA = m.cdA; s.mods.coolMul = m.coolMul; s.cargo.capacity = m.capacity; s.cargo.logs = Math.min(s.cargo.logs, m.capacity);
+    s.mods.mass = m.mass; s.mods.cdA = m.cdA; s.mods.coolMul = m.coolMul; s.mods.topMul = m.topMul; s.mods.reach = m.reach; s.cargo.capacity = m.capacity; s.cargo.logs = Math.min(s.cargo.logs, m.capacity);
     for (const id of rig.attach) rig.inst.push(Object.assign(getAttachment(id).create(rig.vehicle, host), { id }));
     return rig.attach;
   };
   rig.step = (inp, dt) => { PH.step(rig.state, inp, dt, world, ext); for (const i of rig.inst) i.update(dt); PH.drainEvents(rig.state, emit); };
+  rig.setMode = mode => { rig.mode = PH.setMode(rig.state, mode); return rig.mode; };
   rig.unload = () => { const n = rig.state.cargo.logs; rig.state.cargo.logs = 0; emit('cargo:unload', { logs: n }); return n; };
   return rig;
 }

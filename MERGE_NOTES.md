@@ -74,3 +74,13 @@ SR.on(type, fn) / SR.off(type, fn)   // one-shot events
 Hook point for the merge: a module that imports nothing from the game, waits for `window.SR`, and polls `SR.telemetry`
 in its own rAF / AudioWorklet message loop. Source: `updateTelemetry()` and `window.SR` near the end of `js/main.js`;
 since 2026-10-28 the fields are filled by `PH.telemetry()` (`js/phys/physics/`; `js/vehicle.js` no longer exists).
+
+
+## 2026-10-28 update (harvester melt, wider roads, arcade handling, UI modes)
+- Physics `5dfd424` (synced): attachment `melts(ids)`, harvester `mods.topMul 0.9` + `reach`; `PH.setMode(s,'arcade'|'normal')`
+  / `rig.setMode` (kept across `setVehicle`); `s.drift` while drifting. Terrain `0b2e409` (synced): `ROAD_HW` hwy 12, trail 5.4, loop 12.
+- Game side: the rock colliders are now `[x,z,r,key]`. `collideRocks` melts rocks in the front cone when `melts(rig.attach)`
+  (no push/loss/damage, emits `rock:melted`). `rockGone` is persisted. Map/minimap road widths are scaled. Tree HP labels
+  now sort by game-side HP, so a damaged tree keeps its label.
+- New HUD: `#tHand` (ARC/NRM), `#tUi` (UI mode), `#bUnl` (auto-hidden UNLOAD n); body classes `ui-min` / `ui-none`; BOOST is bottom-left.
+- Test hooks `__st`: `handling`, `setHandling`, `ui`, `setUi`, `cycleUi`, `rockGone`, `rocks`, `collideRocks`.

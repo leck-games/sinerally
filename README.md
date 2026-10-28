@@ -1,9 +1,31 @@
 # SineRally – math-world offroad free-roam (FUEL-style)
 Run: `python3 -m http.server 8000 --bind 0.0.0.0` in this folder, open http://localhost:8000 (or http://<PC-LAN-IP>:8000 on a phone on the same Wi-Fi). Live: https://leck-games.github.io/sinerally/
 
-**Keys:** WASD/arrows drive · Space handbrake/drift · Shift boost · Q/E pitch in the air · R reset · M or Tab world map · V next vehicle · U unload logs · G cycle GFX · F fps/debug · Esc close map/menu/editor.
+**Keys:** WASD/arrows drive · Space handbrake/drift · Shift boost · H arcade/normal handling · I cycle UI (full/minimal/none) · Q/E pitch in the air · R reset · M or Tab world map · V next vehicle · U unload logs · G cycle GFX · F fps/debug · Esc close map/menu/editor.
 **Touch:** left joystick steer (+ up/down = air pitch), GAS/BRAKE/BOOST/DRIFT, ☰ menu (car selector, attachments, assists, time, weather, graphics, garage, engine sound + EDIT), tap the minimap for the world map, optional Tilt.
 **URL options:** `?q=low|med|high` force GFX · `?dyn=0` disable dynamic resolution · `?tod=0..1` fix time of day (0.5 = noon) · `?wx=clear|rain|storm|fog|dust` · `?auto=1|drift|boost` self-driving test · `?dbg` · `?nopost` (debug).
+
+## Update: harvester melt · wider roads · arcade handling · UI modes (2026-10-28)
+- **Harvester head** (front mount; TIMBERWOLF default, also fits the BUGGY): instantly melts every tree, bush, cactus and
+  **rock** in its path at any speed. You lose no speed and take no damage. Trees give 1 log per HP (up to the rack/head
+  capacity). The old 25 km/h cut limit is gone. **Not melted:** terrain (hills, cliffs, banks), landmarks and beacons,
+  fuel cans, bridges and water. Melted rocks stay gone (`localStorage.sinerally_rocks_gone`; ☰ → GARAGE → REGROW TREES &
+  ROCKS brings them back). Penalty: **−10 % top speed** (shown in the picker). Physics caps v_max at 0.9× the same car
+  without the head; the physics test checks the ratio per car (0.899–0.902).
+- **Roads:** paved road half-width 6 → 12 m (hwy and loop now have 4 lanes, ~24 m wide). Dirt trails 3.6 → 5.4 m (×1.5).
+  The surface mask, markings, bridges, minimap and world map all use the same widths.
+- **Handling: ARCADE (default) vs NORMAL** (NORMAL is the former SIM model). ARCADE has NFS-Carbon/Trackmania-style
+  assisted grip, easy drift entry with a held drift angle, counter-steer assist and drift → nitro. Each car keeps its own
+  feel. Switch it while driving: the HUD **ARC/NRM** button (top right), ☰ → HANDLING, or key **H**. The choice is saved
+  (`sinerally_handling`, `?handling=normal`). Touch steering has its own curve for each mode.
+- **UI modes**: the ◉/◐/○ corner button or key **I** cycles **FULL → MINIMAL** (driving essentials, small minimap, ARC
+  button) **→ NONE** (everything hidden; the touch zones still work invisibly; a faint button brings the UI back). The
+  mode is saved (`sinerally_ui`). Controls that don't apply hide themselves: UNLOAD n appears only with logs on board,
+  and the temperature bar only when the engine is warm. Everything respects safe-area insets.
+- **BOOST** touch button is bottom-left, under the left thumb next to the joystick (moved right). DRIFT takes BOOST's
+  old slot. Shift still boosts.
+- Tests: `node tools/test-update.cjs` (844×390 touch, 20 checks, screenshots `shots/upd_*.png`),
+  `node tools/shot-road.cjs before|after`.
 
 ## Physics + Terrain merge (2026-10-28)
 The two standalone modules are now part of the game, vendored unchanged with their contracts:
